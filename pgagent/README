@@ -1,0 +1,58 @@
+pgAgent
+=======
+
+This document describes the compilation of pgAgent, a job scheduler for
+PostgreSQL.
+
+pgAgent is managed using pgAdmin (http://www.pgadmin.org). The pgAdmin
+documentation contains details of the setup and use of pgAgent with your
+PostgreSQL system. The latest build of the documentation can be found at
+https://www.pgadmin.org/docs/pgadmin4/development/pgagent.html.
+
+Building pgAgent
+----------------
+
+You will need:
+
+- A C/C++ compiler, such as GCC or Microsoft Visual C++ on Windows.
+- CMake 3.3 (from www.cmake.org)
+- A Boost library 1.41 or higher installation
+- A PostgreSQL 8.3 or higher installation
+
+1) Unpack the pgAgent source code
+2) Create a build directory in which the code will be built.
+3) Run ccmake from the build directory (on Windows, use the CMake graphical
+   interface). By default, ccmake will generate Unix Makefiles - consult the
+   documentation if you wish to generate other types of output:
+
+$ ccmake /path/to/pgagent
+
+4) If required, press 'c' to generate a default configuration:
+
+CMAKE_BUILD_TYPE                 Release
+CMAKE_INSTALL_PREFIX             /usr/local
+CMAKE_OSX_ARCHITECTURES          x86_64
+CMAKE_OSX_SYSROOT                /Developer/SDKs/MacOSX10.10.sdk
+PostgreSQL_CONFIG_EXECUTABLE     /usr/local/pgsql/bin/pg_config
+Boost_FIND_REQUIRED              ON
+Boost_FIND_QUIETLY               OFF
+Boost_DEBUG                      OFF
+Boost_USE_MULTITHREADED          ON
+Boost_USE_STATIC_LIBS            OFF
+
+5) Use the ccmake interface to adjust any settings as required. When configured
+   as required, press 'c' to re-configure (if required) and 'g' to generate the
+   build files and exit.
+
+6) Run 'make' to build pgAgent on Mac or Unix, or open the generated project
+   files in VC++ on Windows and build the solution in the desired configuration.
+
+Running Regression Tests
+========================
+
+To run the regression tests, use a command such as:
+
+make USE_PGXS=1 -f test/Makefile installcheck
+
+You will need to ensure that the appropriate pg_config executable is in the path
+and that variables such as PGPORT and PGUSER are set if required.
