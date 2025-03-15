@@ -21,6 +21,7 @@ CONNinfo  DBconn::ms_basicConnInfo;
 
 static boost::mutex  s_poolLock;
 
+/*-------------------------------------- Polling Service for Listening to Notifications ---------------------------------------------------------*/
 std::string DBconn::GetLastNotification()
 {
     return lastNotification;
@@ -59,6 +60,8 @@ bool DBconn::PollNotification()
     LogMessage("PollNotification: No notifications", LOG_DEBUG);
     return false;
 }
+
+// ******************************************************************************************************************
 
 DBconn::DBconn(const std::string &connectString)
 : m_inUse(false), m_next(NULL), m_prev(NULL), m_minorVersion(0),

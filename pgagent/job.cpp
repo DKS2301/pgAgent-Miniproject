@@ -20,6 +20,8 @@
 #include <sys/stat.h>
 #endif
 
+/*--------------------------Notification Service for internal job Failures-----------------------------------------------*/
+
 std::string GetCurrentTimestamp()
 {
     auto now = std::chrono::system_clock::now();
@@ -47,6 +49,8 @@ void NotifyJobStatus(const std::string &jobid, const std::string &status, const 
     notifyConn->ExecuteVoid(query);
     notifyConn->Return();
 }
+
+//************************************************************************************************************************ 
 
 Job::Job(DBconn *conn, const std::string &jid)
 {

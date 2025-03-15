@@ -10,10 +10,12 @@
 //////////////////////////////////////////////////////////////////////////
 
 #include "pgAgent.h"
+#include <iostream>
+
+/*Include JSON library and libcurl for parsing and smtp notification*/ 
 #include <curl/curl.h>
 #include <sstream>
-#include <iostream>
-#include <nlohmann/json.hpp>  // Include JSON library
+#include <nlohmann/json.hpp>  
 using json = nlohmann::json;
 
 #if !BOOST_OS_WINDOWS
@@ -39,9 +41,14 @@ std::string logFile;
 void        Initialized();
 #endif
 
-#define MAX_BUFFER_SIZE 200    // Send email when 5 jobs are completed
-#define TIME_LIMIT_SEC 30     // Send email after 30 seconds if buffer is not full
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+/*--------------------------    ALERTING ON JOB FAILURES VIA SMTP MAILS    ------------------------------------*/
 
+//  Define buffer and time limit to save the email body
+#define MAX_BUFFER_SIZE 200
+#define TIME_LIMIT_SEC 60     
+
+//buffer and timer for storing email body and expiry time
 std::vector<std::string> emailBuffer; 
 std::chrono::steady_clock::time_point lastEmailTime = std::chrono::steady_clock::now();
 
@@ -55,7 +62,6 @@ size_t read_callback(char *buffer, size_t size, size_t nitems, void *userdata)
     EmailData *emailData = static_cast<EmailData *>(userdata);
     return emailData->stream->readsome(buffer, size * nitems);
 }
-
 
 void SendEmail(const std::string &subject, const std::string &body) {
     CURL *curl = curl_easy_init();
@@ -79,15 +85,15 @@ void SendEmail(const std::string &subject, const std::string &body) {
 
     struct curl_slist *recipients = curl_slist_append(nullptr, to.c_str());
 
-    std::string emailContent =
-        "From: " + from + "\r\n"
-        "To: " + to + "\r\n"
-        "Subject: " + subject + "\r\n"
-        "MIME-Version: 1.0\r\n"
-        "Content-Type: text/plain; charset=UTF-8\r\n"
-        "\r\n" + body + "\r\n";
+    std::ostringstream emailContent;
+    emailContent << "From: " << from << "\r\n"
+                 << "To: " << to << "\r\n"
+                 << "Subject: " << subject << "\r\n"
+                 << "MIME-Version: 1.0\r\n"
+                 << "Content-Type: text/plain; charset=UTF-8\r\n"
+                 << "\r\n" << body << "\r\n";
 
-    std::istringstream emailStream(emailContent);
+    std::istringstream emailStream(emailContent.str());
     EmailData emailData = {&emailStream};
 
     curl_easy_setopt(curl, CURLOPT_USERNAME, from.c_str());
@@ -110,16 +116,14 @@ void SendEmail(const std::string &subject, const std::string &body) {
 
 void SendBufferedEmail()
 {
-    if (emailBuffer.empty())
-        return;
+    if (emailBuffer.empty()) return;
 
-    std::string emailBody = "The following jobs have failed :\n\n";
-    for (const std::string &msg : emailBuffer)
-    {
-        emailBody += msg + "\n";
-    }
+    std::ostringstream emailBody;
+    emailBody << "The following jobs have failed :\n\n";
+    for (const auto &msg : emailBuffer)
+        emailBody << msg << "\n";
 
-    SendEmail("Job Aborted Summary", emailBody);
+    SendEmail("Job Aborted Summary", emailBody.str());
     emailBuffer.clear();
     lastEmailTime = std::chrono::steady_clock::now();
 }
@@ -130,46 +134,39 @@ void CheckAndSendEmail()
     double elapsedSeconds = std::chrono::duration_cast<std::chrono::seconds>(now - lastEmailTime).count();
 
     if (emailBuffer.size() >= MAX_BUFFER_SIZE || elapsedSeconds >= TIME_LIMIT_SEC)
-    {
         SendBufferedEmail();
-    }
 }
 
-
+//Listens for Notifications
 void PollForJobStatus(DBconn *conn)
 {
-	// Poll for database notifications
-	while (conn->PollNotification())
-	{
-		std::string notification = conn->GetLastNotification();
-		try
-		{
-			// Parse the JSON notification
-			json jobData = json::parse(notification);
+	CheckAndSendEmail();
+    while (conn->PollNotification())
+    {
+        try
+        {
+            json jobData = json::parse(conn->GetLastNotification());
+            std::string jobid = jobData.value("job_id", "Unknown");
+            std::string status = jobData.value("status", "Unknown");
+            std::string description = jobData.value("description", "");
+            std::string timestamp = jobData.value("timestamp", "");
 
-			// Extract job details
-			std::string jobid = jobData.value("job_id", "Unknown");
-			std::string status = jobData.value("status", "Unknown");
-			std::string description = jobData.value("description", "");
-			std::string timestamp = jobData.value("timestamp", "");
+            LogMessage("Job " + jobid + " status: " + status + " at " + timestamp, LOG_INFO);
 
-			// Log the job status
-			LogMessage("Job " + jobid + " status: " + status + " at " + timestamp, LOG_INFO);
-
-			// Buffer email notifications only for non-failure jobs
-			if (status == "Failure")
-			{
-				LogMessage("Buffering job failed email...", LOG_INFO);
-				emailBuffer.push_back("Job " + jobid + " : " + status + " due to "+description+" at " + timestamp +"\n");
+            if (status == "Failure")
+            {
+                emailBuffer.emplace_back("Job " + jobid + "\nReason : " + description + "\nAt " + timestamp+"\n\n");
 				CheckAndSendEmail();
-			}
-		}
-		catch (json::parse_error &e)
-		{
-			LogMessage("JSON Parse Error: " + std::string(e.what()), LOG_ERROR);
-		}
-	}
+            }
+        }
+        catch (json::parse_error &e)
+        {
+            LogMessage("JSON Parse Error: " + std::string(e.what()), LOG_ERROR);
+        }
+    }
 }
+//********************************************************************************************************************
+
 
 int MainRestartLoop(DBconn *serviceConn)
 {
@@ -212,7 +209,7 @@ int MainRestartLoop(DBconn *serviceConn)
 			"SELECT jlgid "
 			"FROM pga_tmp_zombies z, pgagent.pga_job j, pgagent.pga_joblog l "
 			"WHERE z.jagpid=j.jobagentid AND j.jobid = l.jlgjobid AND l.jlgstatus='r');\n"
-			// **Send NOTIFY when job is aborted**
+			//************************** Send NOTIFY when job is aborted *****************************
 			"WITH job_data AS ("
 			"  SELECT jlgjobid AS job_id, "
 			"         'Failure: orphaned job aborted' AS status, "
