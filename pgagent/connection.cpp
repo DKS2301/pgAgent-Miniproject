@@ -11,7 +11,9 @@
 
 #include "pgAgent.h"
 #include <string>
-
+#include <curl/curl.h>
+#include <sstream>
+#include <iostream>
 namespace ip = boost::asio::ip;
 
 DBconn   *DBconn::ms_primaryConn = NULL;
@@ -19,44 +21,9 @@ CONNinfo  DBconn::ms_basicConnInfo;
 
 static boost::mutex  s_poolLock;
 
-DBconn::DBconn(const std::string &connectString)
-: m_inUse(false), m_next(NULL), m_prev(NULL), m_minorVersion(0),
-	m_majorVersion(0)
+std::string DBconn::GetLastNotification()
 {
-	m_connStr = connectString;
-
-	Connect(connectString);
-}
-
-
-bool DBconn::Connect(const std::string &connStr)
-{
-	LogMessage(("Creating DB connection: " + connStr), LOG_DEBUG);
-	m_conn = PQconnectdb(connStr.c_str());
-
-	if (PQstatus(m_conn) != CONNECTION_OK)
-	{
-		m_lastError = (const char *)PQerrorMessage(m_conn);
-		PQfinish(m_conn);
-		m_conn = NULL;
-
-		return false;
-	}
- 	LogMessage("Executing LISTEN pgagent_notify", LOG_DEBUG);
-    ExecuteVoid("LISTEN pgagent_notify;");
-
-	return (m_conn != NULL);
-}
-
-
-DBconn::~DBconn()
-{
-	// clear a single connection
-	if (m_conn)
-	{
-		PQfinish(m_conn);
-		m_conn = NULL;
-	}
+    return lastNotification;
 }
 
 bool DBconn::PollNotification()
@@ -82,8 +49,8 @@ bool DBconn::PollNotification()
     PGnotify *notify = PQnotifies(m_conn);
     if (notify)
     {
-		std::string payload = notify->extra ? notify->extra : "(no payload)";
-        std::string notificationMessage = "🔔 PollNotification: Received [" + std::string(notify->relname) + "] -> Payload: " + payload;
+		lastNotification= notify->extra ? notify->extra : "(no payload)";
+        std::string notificationMessage = "🔔 PollNotification: Received [" + std::string(notify->relname) + "] -> Payload: " + lastNotification;
         LogMessage(notificationMessage, LOG_DEBUG);
         PQfreemem(notify);
         return true;
@@ -93,17 +60,44 @@ bool DBconn::PollNotification()
     return false;
 }
 
-
-std::string DBconn::GetNotificationPayload()
+DBconn::DBconn(const std::string &connectString)
+: m_inUse(false), m_next(NULL), m_prev(NULL), m_minorVersion(0),
+	m_majorVersion(0)
 {
-    PGnotify *notify = PQnotifies(m_conn);
-    if (notify)
-    {
-        std::string payload = notify->extra;
-        PQfreemem(notify);
-        return payload;
-    }
-    return "";
+	m_connStr = connectString;
+
+	Connect(connectString);
+}
+
+
+bool DBconn::Connect(const std::string &connStr)
+{
+	LogMessage(("Creating DB connection: " + connStr), LOG_DEBUG);
+	m_conn = PQconnectdb(connStr.c_str());
+
+	if (PQstatus(m_conn) != CONNECTION_OK)
+	{
+		m_lastError = (const char *)PQerrorMessage(m_conn);
+		PQfinish(m_conn);
+		m_conn = NULL;
+
+		return false;
+	}
+ 	LogMessage("Executing LISTEN pgagent pgagent_notify", LOG_DEBUG);
+    ExecuteVoid("LISTEN pgagent_notify;");
+
+	return (m_conn != NULL);
+}
+
+
+DBconn::~DBconn()
+{
+	// clear a single connection
+	if (m_conn)
+	{
+		PQfinish(m_conn);
+		m_conn = NULL;
+	}
 }
 
 

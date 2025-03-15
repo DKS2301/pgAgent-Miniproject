@@ -10,7 +10,6 @@
 //////////////////////////////////////////////////////////////////////////
 
 #include "pgAgent.h"
-#include <curl/curl.h>
 #include <sys/types.h>
 #include <sstream>
 #include <iostream>
@@ -21,115 +20,23 @@
 #include <sys/stat.h>
 #endif
 
-#define MAX_BUFFER_SIZE 30    // Send email when 5 jobs are completed
-#define TIME_LIMIT_SEC 30      // Send email after 30 seconds if buffer is not full
-
-std::vector<std::string> emailBuffer; 
-std::chrono::steady_clock::time_point lastEmailTime = std::chrono::steady_clock::now();
-
-struct EmailData
+std::string GetCurrentTimestamp()
 {
-    std::istringstream *stream;
-};
+    auto now = std::chrono::system_clock::now();
+    std::time_t now_c = std::chrono::system_clock::to_time_t(now);
+    
+    char buffer[20];
+    std::strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", std::localtime(&now_c));
 
-size_t read_callback(char *buffer, size_t size, size_t nitems, void *userdata)
-{
-    EmailData *emailData = static_cast<EmailData *>(userdata);
-    return emailData->stream->readsome(buffer, size * nitems);
+    return std::string(buffer);
 }
 
-void SendEmail(const std::string &recipient, const std::string &subject, const std::string &body)
+void NotifyJobStatus(const std::string &jobid, const std::string &status, const std::string &description)
 {
-    CURL *curl = curl_easy_init();
-    if (!curl)
-    {
-        std::cerr << "Failed to initialize CURL!" << std::endl;
-        return;
-    }
+ 	std::string payload = "{\"job_id\": \"" + jobid + "\", \"status\": \"" + status + "\", \"description\": \"" + description + "\", \"timestamp\": \"" + GetCurrentTimestamp() + "\"}";
 
-    struct curl_slist *recipients = NULL;
-    recipients = curl_slist_append(recipients, recipient.c_str());
-
-    curl_easy_setopt(curl, CURLOPT_USERNAME, "deepaks11a7@gmail.com");
-    curl_easy_setopt(curl, CURLOPT_PASSWORD, "cjke kgqn ihrk jdlk");
-    curl_easy_setopt(curl, CURLOPT_URL, "smtp://smtp.gmail.com:587");
-    curl_easy_setopt(curl, CURLOPT_USE_SSL, CURLUSESSL_ALL);
-    curl_easy_setopt(curl, CURLOPT_MAIL_FROM, "<deepaks11a7@gmail.com>");
-    curl_easy_setopt(curl, CURLOPT_MAIL_RCPT, recipients);
-    curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
-    curl_easy_setopt(curl, CURLOPT_MAIL_AUTH, "<deepaks11a7@gmail.com>");
-    curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
-    curl_easy_setopt(curl, CURLOPT_PORT, 587); // Enable STARTTLS
-
-    std::string emailContent =
-        "From: Postgres Sender <deepaks11a7@gmail.com>\r\n"
-        "To: " + recipient + "\r\n"
-        "Subject: " + subject + "\r\n"
-        "MIME-Version: 1.0\r\n"
-        "Content-Type: text/plain; charset=UTF-8\r\n"
-        "\r\n" + body + "\r\n";
-
-    std::istringstream emailStream(emailContent);
-    EmailData emailData = {&emailStream};
-
-    curl_easy_setopt(curl, CURLOPT_READFUNCTION, read_callback);
-    curl_easy_setopt(curl, CURLOPT_READDATA, &emailData);
-    curl_easy_setopt(curl, CURLOPT_UPLOAD, 1L);
-
-    CURLcode res = curl_easy_perform(curl);
-    if (res != CURLE_OK)
-    {
-        // std::cerr << "Email send failed: " << curl_easy_strerror(res) << std::endl;
-		LogMessage("Email sent failed ", LOG_ERROR);
-
-    }
-    else
-    {
-		LogMessage("Email sent successfully!" , LOG_INFO);
-    }
-
-    // Free memory correctly
-    if (recipients)
-        curl_slist_free_all(recipients);
-
-    curl_easy_cleanup(curl);
-}
-
-void SendBufferedEmail()
-{
-    if (emailBuffer.empty())
-        return;
-
-    std::string emailBody = "The following jobs have completed:\n\n";
-    for (const std::string &msg : emailBuffer)
-    {
-        emailBody += msg + "\n";
-    }
-
-    SendEmail("devika7b22@gmail.com", "Job Completion Summary", emailBody);
-    emailBuffer.clear();
-    lastEmailTime = std::chrono::steady_clock::now();
-}
-
-void CheckAndSendEmail()
-{
-    auto now = std::chrono::steady_clock::now();
-    double elapsedSeconds = std::chrono::duration_cast<std::chrono::seconds>(now - lastEmailTime).count();
-
-    if (emailBuffer.size() >= MAX_BUFFER_SIZE || elapsedSeconds >= TIME_LIMIT_SEC)
-    {
-        SendBufferedEmail();
-    }
-}
-
-void NotifyJobStatus(const std::string &jobid, const std::string &status)
-{
-    std::string query = "NOTIFY pgagent_notify, '" + jobid + ":" + status + "'";
-    DBconn *notifyConn = DBconn::Get();
-	notifyConn->ExecuteVoid("LISTEN pgagent_notify");
-
+    std::string query = "NOTIFY job_status_update, '" + payload + "'";
+	DBconn *notifyConn = DBconn::Get();
     if (!notifyConn)  
     {
         LogMessage("NotifyJobStatus: Connection is NULL or not connected!", LOG_ERROR);
@@ -139,14 +46,7 @@ void NotifyJobStatus(const std::string &jobid, const std::string &status)
     LogMessage("Executing query: " + query, LOG_DEBUG);
     notifyConn->ExecuteVoid(query);
     notifyConn->Return();
-	if(status == "completed"){
-		LogMessage("Buffering job completion email...", LOG_INFO);
-        emailBuffer.push_back("Job " + jobid);
-        CheckAndSendEmail();
-	}
 }
-
-
 
 Job::Job(DBconn *conn, const std::string &jid)
 {
@@ -154,7 +54,7 @@ Job::Job(DBconn *conn, const std::string &jid)
 	m_jobid = jid;
 	m_status = "";
 	LogMessage("Starting job: " + m_jobid, LOG_DEBUG);
-	NotifyJobStatus(m_jobid, "starting");
+	NotifyJobStatus(m_jobid, "starting","");
 
 
 	int rc = m_threadConn->ExecuteVoid(
@@ -178,7 +78,7 @@ Job::Job(DBconn *conn, const std::string &jid)
 			if (res)
 			{
 				m_status = "r";
-				NotifyJobStatus(m_jobid, "running");
+				NotifyJobStatus(m_jobid, "running","");
 
 			}
 		}
@@ -203,7 +103,7 @@ Job::~Job()
 	m_threadConn->Return();
 
 	LogMessage("Completed job: " + m_jobid, LOG_DEBUG);
-	NotifyJobStatus(m_jobid, "completed");
+	NotifyJobStatus(m_jobid, "completed","");
 
 }
 
@@ -223,7 +123,7 @@ int Job::Execute()
 	{
 		LogMessage("No steps found for jobid " + m_jobid, LOG_WARNING);
 		m_status = "i";
-		NotifyJobStatus(m_jobid, "internal error");
+		NotifyJobStatus(m_jobid, "Failure", "StepError: No steps found");
 		return -1;
 	}
 
@@ -231,7 +131,8 @@ int Job::Execute()
 	{
 		DBconn      *stepConn = nullptr;
 		std::string  jslid, stepid, jpecode, output;
-        NotifyJobStatus(m_jobid + ":" + stepid, "running");
+		std::string failureMessage;
+        NotifyJobStatus(m_jobid + ":" + stepid, "running","");
 		stepid = steps->GetString("jstid");
 
 		DBresultPtr id = m_threadConn->Execute(
@@ -245,9 +146,7 @@ int Job::Execute()
 				"INSERT INTO pgagent.pga_jobsteplog(jslid, jsljlgid, jsljstid, jslstatus) "
 				"SELECT " + jslid + ", " + m_logid + ", " + stepid + ", 'r'" +
 				"  FROM pgagent.pga_jobstep WHERE jstid=" + stepid);
-			m_threadConn->ExecuteVoid(
-				"NOTIFY pgagent_notify, 'JobStep " + stepid + " started for Job " + m_jobid + "'"
-			);
+			NotifyJobStatus(m_jobid,"started","JobStep " + stepid + " started for Job ");
 
 			if (res)
 			{
@@ -262,6 +161,7 @@ int Job::Execute()
 		{
 			LogMessage("Value of rc is " + std::to_string(rc) + " for job " + m_jobid, LOG_WARNING);
 			m_status = "i";
+			NotifyJobStatus(m_jobid,"failure",	"No steps found for jobid ");
 			return -1;
 		}
 
@@ -403,6 +303,7 @@ int Job::Execute()
 					LogMessage((boost::format(
 						"Couldn't execute script: %s, GetLastError() returned %d, errno = %d"
 					) % filename.c_str() % GetLastError() % errno).str(), LOG_WARNING);
+					N
 					CloseHandle(h_process);
 					rc = -1;
 
@@ -523,15 +424,15 @@ int Job::Execute()
 				output = "Invalid step type!";
 				LogMessage("Invalid step type!", LOG_WARNING);
 				m_status = "i";
+				NotifyJobStatus(m_jobid,"Failure","internal Error :Invalid step type!");
 				return -1;
 			}
 		}
 
 		std::string stepstatus;
-		if (succeeded)
+		if (succeeded){
 			stepstatus = "s";
-		else
-			stepstatus = steps->GetString("jstonerror");
+		}
 
 		rc = m_threadConn->ExecuteVoid(
 			"UPDATE pgagent.pga_jobsteplog "
@@ -539,16 +440,23 @@ int Job::Execute()
 			"       jslresult = " + NumToStr(rc) + ", jslstatus = '" + stepstatus + "', " +
 			"       jsloutput = " + m_threadConn->qtDbString(output) + " " +
 			" WHERE jslid=" + jslid);
-		if (rc != 1 || stepstatus == "f")
+
+		if (rc != 1 || stepstatus != "s")
 		{
 			m_status = "f";
+			stepstatus = steps->GetString("jstonerror");
+			failureMessage = "Failed at step " + stepid +" "+ output+stepstatus;
+			std::replace(failureMessage.begin(), failureMessage.end(), '"', ' '); // Replace " with '
+			std::replace(failureMessage.begin(), failureMessage.end(), '\n', ' '); // Replace " with '
+
+            NotifyJobStatus(m_jobid, "Failure",failureMessage);
 			return -1;
 		}
 		steps->MoveNext();
 	}
 
 	m_status = "s";
-	NotifyJobStatus(m_jobid, "success");
+	NotifyJobStatus(m_jobid, "success","");
 	return 0;
 }
 
@@ -591,6 +499,7 @@ void JobThread::operator()()
 				"VALUES (nextval('pgagent.pga_joblog_jlgid_seq'), " +
 				m_jobid + ", 'i')"
 			);
+            NotifyJobStatus(m_jobid, "Failure","internal error:Failed to launch the thread.");
 			if (res)
 				res = NULL;
 		}

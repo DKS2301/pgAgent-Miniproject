@@ -10,6 +10,11 @@
 //////////////////////////////////////////////////////////////////////////
 
 #include "pgAgent.h"
+#include <curl/curl.h>
+#include <sstream>
+#include <iostream>
+#include <nlohmann/json.hpp>  // Include JSON library
+using json = nlohmann::json;
 
 #if !BOOST_OS_WINDOWS
 #include <unistd.h>
@@ -34,28 +39,143 @@ std::string logFile;
 void        Initialized();
 #endif
 
-void ProcessJobNotification(DBconn *serviceConn)
+#define MAX_BUFFER_SIZE 200    // Send email when 5 jobs are completed
+#define TIME_LIMIT_SEC 30     // Send email after 30 seconds if buffer is not full
+
+std::vector<std::string> emailBuffer; 
+std::chrono::steady_clock::time_point lastEmailTime = std::chrono::steady_clock::now();
+
+struct EmailData
 {
-    while (serviceConn->PollNotification())
+    std::istringstream *stream;
+};
+
+size_t read_callback(char *buffer, size_t size, size_t nitems, void *userdata)
+{
+    EmailData *emailData = static_cast<EmailData *>(userdata);
+    return emailData->stream->readsome(buffer, size * nitems);
+}
+
+
+void SendEmail(const std::string &subject, const std::string &body) {
+    CURL *curl = curl_easy_init();
+    if (!curl) {
+        std::cerr << "Failed to initialize CURL!" << std::endl;
+        return;
+    }
+
+    const char *fromEnv = std::getenv("MY_MAIL");
+    const char *toEnv = std::getenv("REC_MAIL");
+    const char *passEnv = std::getenv("MAIL_PASS");
+
+    if (!fromEnv || !toEnv || !passEnv) {
+        LogMessage("Error: Email environment variables are not set!", LOG_ERROR);
+        return;
+    }
+
+    std::string from = fromEnv;
+    std::string to = toEnv;
+    std::string pass = passEnv;
+
+    struct curl_slist *recipients = curl_slist_append(nullptr, to.c_str());
+
+    std::string emailContent =
+        "From: " + from + "\r\n"
+        "To: " + to + "\r\n"
+        "Subject: " + subject + "\r\n"
+        "MIME-Version: 1.0\r\n"
+        "Content-Type: text/plain; charset=UTF-8\r\n"
+        "\r\n" + body + "\r\n";
+
+    std::istringstream emailStream(emailContent);
+    EmailData emailData = {&emailStream};
+
+    curl_easy_setopt(curl, CURLOPT_USERNAME, from.c_str());
+    curl_easy_setopt(curl, CURLOPT_PASSWORD, pass.c_str());
+    curl_easy_setopt(curl, CURLOPT_URL, "smtp://smtp.gmail.com:587");
+    curl_easy_setopt(curl, CURLOPT_USE_SSL, CURLUSESSL_ALL);
+    curl_easy_setopt(curl, CURLOPT_MAIL_FROM, from.c_str());
+    curl_easy_setopt(curl, CURLOPT_MAIL_RCPT, recipients);
+    curl_easy_setopt(curl, CURLOPT_READFUNCTION, read_callback);
+    curl_easy_setopt(curl, CURLOPT_READDATA, &emailData);
+    curl_easy_setopt(curl, CURLOPT_UPLOAD, 1L);
+
+    CURLcode res = curl_easy_perform(curl);
+
+    LogMessage(res == CURLE_OK ? "Email sent successfully!" : "Email sending failed", res == CURLE_OK ? LOG_INFO : LOG_ERROR);
+
+    curl_slist_free_all(recipients);
+    curl_easy_cleanup(curl);
+}
+
+void SendBufferedEmail()
+{
+    if (emailBuffer.empty())
+        return;
+
+    std::string emailBody = "The following jobs have failed :\n\n";
+    for (const std::string &msg : emailBuffer)
     {
-        std::string payload = serviceConn->GetNotificationPayload();
-        LogMessage("Received job status update: " + payload, LOG_DEBUG);
+        emailBody += msg + "\n";
+    }
 
-        std::istringstream ss(payload);
-        std::string jobid, status;
-        ss >> jobid >> status;
+    SendEmail("Job Aborted Summary", emailBody);
+    emailBuffer.clear();
+    lastEmailTime = std::chrono::steady_clock::now();
+}
 
-        // Handle job status update
-        LogMessage("Updating job " + jobid + " status to " + status, LOG_INFO);
+void CheckAndSendEmail()
+{
+    auto now = std::chrono::steady_clock::now();
+    double elapsedSeconds = std::chrono::duration_cast<std::chrono::seconds>(now - lastEmailTime).count();
+
+    if (emailBuffer.size() >= MAX_BUFFER_SIZE || elapsedSeconds >= TIME_LIMIT_SEC)
+    {
+        SendBufferedEmail();
     }
 }
 
 
+void PollForJobStatus(DBconn *conn)
+{
+	// Poll for database notifications
+	while (conn->PollNotification())
+	{
+		std::string notification = conn->GetLastNotification();
+		try
+		{
+			// Parse the JSON notification
+			json jobData = json::parse(notification);
+
+			// Extract job details
+			std::string jobid = jobData.value("job_id", "Unknown");
+			std::string status = jobData.value("status", "Unknown");
+			std::string description = jobData.value("description", "");
+			std::string timestamp = jobData.value("timestamp", "");
+
+			// Log the job status
+			LogMessage("Job " + jobid + " status: " + status + " at " + timestamp, LOG_INFO);
+
+			// Buffer email notifications only for non-failure jobs
+			if (status == "Failure")
+			{
+				LogMessage("Buffering job failed email...", LOG_INFO);
+				emailBuffer.push_back("Job " + jobid + " : " + status + " due to "+description+" at " + timestamp +"\n");
+				CheckAndSendEmail();
+			}
+		}
+		catch (json::parse_error &e)
+		{
+			LogMessage("JSON Parse Error: " + std::string(e.what()), LOG_ERROR);
+		}
+	}
+}
+
 int MainRestartLoop(DBconn *serviceConn)
 {
-	serviceConn->ExecuteVoid("LISTEN job_status_update");
     LogMessage("Listening for job status updates...", LOG_DEBUG);
 	// clean up old jobs
+    serviceConn->ExecuteVoid("LISTEN job_status_update");
 
 	int rc;
 
@@ -92,6 +212,17 @@ int MainRestartLoop(DBconn *serviceConn)
 			"SELECT jlgid "
 			"FROM pga_tmp_zombies z, pgagent.pga_job j, pgagent.pga_joblog l "
 			"WHERE z.jagpid=j.jobagentid AND j.jobid = l.jlgjobid AND l.jlgstatus='r');\n"
+			// **Send NOTIFY when job is aborted**
+			"WITH job_data AS ("
+			"  SELECT jlgjobid AS job_id, "
+			"         'Failure: orphaned job aborted' AS status, "
+			"         now() AS timestamp "
+			"  FROM pgagent.pga_joblog "
+			"  WHERE jlgstatus = 'd' "
+			"  LIMIT 1"
+			") "
+			"SELECT pg_notify('job_status_update', row_to_json(job_data)::text) FROM job_data;\n"
+
 
 			"UPDATE pgagent.pga_jobsteplog SET jslstatus='d' WHERE jslid IN ( "
 			"SELECT jslid "
@@ -120,7 +251,8 @@ int MainRestartLoop(DBconn *serviceConn)
 
 	while (1)
 	{
-		ProcessJobNotification(serviceConn);
+		//ProcessJobNotification(serviceConn);
+		PollForJobStatus(serviceConn);
 
 		bool foundJobToExecute = false;
 
