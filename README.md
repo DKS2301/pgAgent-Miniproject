@@ -17,5 +17,4 @@ Features
 
 ![pgAgent receives notifications for job failures and sends mail](https://github.com/user-attachments/assets/e97467ab-6137-4b6e-86c9-dca9efcce432)
 
-![pagagent Alert mail for failed jobs with timestamp and reason](https://github.com/user-attachments/assets/7b369916-428f-4018-aaa9-8b0d2e82733c)
-)
+![pgagent Alert mail for failed jobs with timestamp and reason](https://github.com/user-attachments/assets/7b369916-428f-4018-aaa9-8b0d2e82733c)
