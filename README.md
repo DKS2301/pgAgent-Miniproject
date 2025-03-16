@@ -11,9 +11,9 @@ Features
 - Logs email delivery status for debugging and audit.
 
 #### Marked By
-- ([pgAgent.cpp](https://github.com/DKS2301/pgAgent-Miniproject/blob/8ac251c1708fb8f044041f05536009e4e5655a4b/pgagent/pgAgent.cpp))
-- job.cpp : lines job.cpp#L24-56, 
-- connection.cpp : lines connection.cpp#L24 - 66
+- pgAgent.cpp: [SMTP Alerting](https://github.com/DKS2301/pgAgent-Miniproject/blob/8ac251c1708fb8f044041f05536009e4e5655a4b/pgagent/pgAgent.cpp#L44-L169) ,[Sending notifies](https://github.com/DKS2301/pgAgent-Miniproject/blob/8ac251c1708fb8f044041f05536009e4e5655a4b/pgagent/pgAgent.cpp#L44-L169)
+- job.cpp : [Notification Service](https://github.com/DKS2301/pgAgent-Miniproject/blob/8ac251c1708fb8f044041f05536009e4e5655a4b/pgagent/job.cpp)
+- connection.cpp : [Polling Service](https://github.com/DKS2301/pgAgent-Miniproject/blob/8ac251c1708fb8f044041f05536009e4e5655a4b/pgagent/connection.cpp)
 
 ![pgAgent receives notifications for job failures and sends mail](https://github.com/user-attachments/assets/e97467ab-6137-4b6e-86c9-dca9efcce432)
 
