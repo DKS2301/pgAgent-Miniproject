@@ -16,12 +16,12 @@ Features
 - connection.cpp : [Polling Service](https://github.com/DKS2301/pgAgent-Miniproject/blob/8ac251c1708fb8f044041f05536009e4e5655a4b/pgagent/connection.cpp#L24-L66)
 
 <figure>
-  <img src="https://github.com/user-attachments/assets/e97467ab-6137-4b6e-86c9-dca9efcce432" alt="pgagent receives job status updates" width="400">
-  <figcaption>ppgAgent receives notifications for job status updates.</figcaption>
+  <img src="https://github.com/user-attachments/assets/e97467ab-6137-4b6e-86c9-dca9efcce432" alt="pgagent receives job status updates" width="700">
+  <figcaption><p>ppgAgent receives notifications for job status updates.</p></figcaption>
 </figure>
 
 
 <figure>
-  <img src="https://github.com/user-attachments/assets/7b369916-428f-4018-aaa9-8b0d2e82733c" alt="mail from pgagent" width="400">
-  <figcaption>pgagent Alert mail for failed jobs with timestamp and reason.</figcaption>
+  <img src="https://github.com/user-attachments/assets/7b369916-428f-4018-aaa9-8b0d2e82733c" alt="mail from pgagent" width="700">
+  <figcaption><p>pgagent Alert mail for failed jobs with timestamp and reason.</p></figcaption>
 </figure>
