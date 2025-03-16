@@ -11,7 +11,7 @@ Features
 - Logs email delivery status for debugging and audit.
 
 #### Marked By
-- pgAgent.cpp: lines pgAgent.cpp#L44 -169, pgAgent.cpp#L213-222
+- ([pgAgent.cpp](https://github.com/DKS2301/pgAgent-Miniproject/blob/8ac251c1708fb8f044041f05536009e4e5655a4b/pgagent/pgAgent.cpp))
 - job.cpp : lines job.cpp#L24-56, 
 - connection.cpp : lines connection.cpp#L24 - 66
 
