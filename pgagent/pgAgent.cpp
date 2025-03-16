@@ -41,12 +41,13 @@ std::string logFile;
 void        Initialized();
 #endif
 
-/////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-/*--------------------------    ALERTING ON JOB FAILURES VIA SMTP MAILS    ------------------------------------*/
+///////////////////////////////////////////////////////////////////////////////////////////////////////////
+//   ALERTING ON JOB FAILURES VIA SMTP MAILS 
+//////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 //  Define buffer and time limit to save the email body
-#define MAX_BUFFER_SIZE 200
-#define TIME_LIMIT_SEC 60     
+#define MAX_BUFFER_SIZE 250
+#define TIME_LIMIT_SEC 120     
 
 //buffer and timer for storing email body and expiry time
 std::vector<std::string> emailBuffer; 
@@ -108,7 +109,7 @@ void SendEmail(const std::string &subject, const std::string &body) {
 
     CURLcode res = curl_easy_perform(curl);
 
-    LogMessage(res == CURLE_OK ? "Email sent successfully!" : "Email sending failed", res == CURLE_OK ? LOG_INFO : LOG_ERROR);
+    LogMessage(res == CURLE_OK ? "Email sent successfully!" : "Email sending failed", res == CURLE_OK ? LOG_INFO : LOG_WARNING);
 
     curl_slist_free_all(recipients);
     curl_easy_cleanup(curl);
