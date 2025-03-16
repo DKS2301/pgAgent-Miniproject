@@ -10,6 +10,11 @@ Features
 - Supports authentication & SSL/TLS
 - Logs email delivery status for debugging and audit.
 
+#### Marked By
+- pgAgent.cpp: lines pgAgent.cpp#L44 -169, pgAgent.cpp#L213-222
+- job.cpp : lines job.cpp#L24-56, 
+- connection.cpp : lines connection.cpp#L24 - 66
+
 ![pgAgent receives notifications for job failures and sends mail](https://github.com/user-attachments/assets/e97467ab-6137-4b6e-86c9-dca9efcce432)
 
 ![pagagent Alert mail for failed jobs with timestamp and reason](https://github.com/user-attachments/assets/7b369916-428f-4018-aaa9-8b0d2e82733c)
