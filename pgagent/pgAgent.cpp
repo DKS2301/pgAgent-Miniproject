@@ -149,14 +149,13 @@ void PollForJobStatus(DBconn *conn)
             json jobData = json::parse(conn->GetLastNotification());
             std::string jobid = jobData.value("job_id", "Unknown");
             std::string status = jobData.value("status", "Unknown");
-            std::string description = jobData.value("description", "");
             std::string timestamp = jobData.value("timestamp", "");
 
             LogMessage("Job " + jobid + " status: " + status + " at " + timestamp, LOG_INFO);
 
             if (status == "Failure")
             {
-                emailBuffer.emplace_back("Job " + jobid + "\nReason : " + description + "\nAt " + timestamp+"\n\n");
+                emailBuffer.emplace_back("Job " + jobid +"\nAt " + timestamp+"\n\n");
 				CheckAndSendEmail();
             }
         }
