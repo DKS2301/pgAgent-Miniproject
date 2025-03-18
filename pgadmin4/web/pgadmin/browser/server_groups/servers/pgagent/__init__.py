@@ -27,8 +27,6 @@ from pgadmin.utils.preferences import Preferences
 from pgadmin.browser.server_groups.servers.pgagent.utils \
     import format_schedule_data, format_step_data
 
-from .job_status_websocket import PgAgentJobStatusReceiver
-
 
 class JobModule(CollectionNodeModule):
     _NODE_TYPE = 'pga_job'
@@ -124,70 +122,11 @@ SELECT EXISTS(
         from .steps import blueprint as module
         self.submodules.append(module)
 
+        # Import and register the job_status_socket module
+        from .job_status_socket import blueprint as job_status_socket_module
+        self.submodules.append(job_status_socket_module)
+
         super().register(app, options)
-    
-    #########################################################################
-    # Add WebSocket route support
-    #########################################################################
-
-    from pgadmin import socketio
-
-    @socketio.on('connect', namespace='/pgagent')
-    @login_required
-    def pgagent_socket_connect():
-        """
-        Handle WebSocket connection
-        """
-        current_app.logger.info('Client connected to PgAgent WebSocket')
-
-    @socketio.on('disconnect', namespace='/pgagent')
-    @login_required
-    def pgagent_socket_disconnect():
-        """
-        Handle WebSocket disconnection
-        """
-        server_id = request.args.get('server_id')
-        if server_id:
-            # Clean up any active listeners
-            listener = current_app.pgagent_job_listeners.get(f"{server_id}_{current_user.id}")
-            if listener:
-                listener.stop_listening()
-                del current_app.pgagent_job_listeners[f"{server_id}_{current_user.id}"]
-        
-        current_app.logger.info('Client disconnected from PgAgent WebSocket')
-
-    # Add WebSocket route for job status updates
-    @module.route('/job_status_events/<int:server_id>')
-    @login_required
-    def job_status_events(server_id):
-        """
-        Create a WebSocket connection for PgAgent job status events
-        """
-        from flask_socketio import SocketIO
-        
-        # Initialize pgagent_job_listeners in app context if it doesn't exist
-        if not hasattr(current_app, 'pgagent_job_listeners'):
-            current_app.pgagent_job_listeners = {}
-        
-        # Create a unique key for this user and server
-        key = f"{server_id}_{current_user.id}"
-        
-        # Check if we already have a listener for this user/server combination
-        listener = current_app.pgagent_job_listeners.get(key)
-        if listener:
-            # Stop the existing listener
-            listener.stop_listening()
-        
-        # Create a new listener
-        listener = PgAgentJobStatusReceiver(server_id, current_user.id)
-        current_app.pgagent_job_listeners[key] = listener
-        
-        # Start the listener in a separate thread
-        listener.start_listening(request.environ.get('wsgi.websocket'))
-        
-        return Response()
-
-    #######################################################################################
 
 
 
@@ -215,16 +154,7 @@ class JobView(PGChildNodeView):
         'msql': [{'get': 'msql'}, {'get': 'msql'}],
         'run_now': [{'put': 'run_now'}],
         'classes': [{}, {'get': 'job_classes'}],
-        'children': [{'get': 'children'}]@blueprint.before_app_first_request
-def register_pgagent_jobs_module():
-    """
-    Initialize module setup for pgAdmin
-    """
-    # ... existing code ...
-    
-    # Initialize empty dictionary for pgagent job status listeners
-    if not hasattr(current_app, 'pgagent_job_listeners'):
-        current_app.pgagent_job_listeners = {},
+        'children': [{'get': 'children'}],
         'stats': [{'get': 'statistics'}]
     })
 
@@ -688,17 +618,6 @@ SELECT EXISTS(
                     self.conn, self.template_path)
                 if not status:
                     internal_server_error(errormsg=res)
-
-    @blueprint.before_app_first_request
-    def register_pgagent_jobs_module():
-        """
-        Initialize module setup for pgAdmin
-        """
-        # ... existing code ...
-        
-        # Initialize empty dictionary for pgagent job status listeners
-        if not hasattr(current_app, 'pgagent_job_listeners'):
-            current_app.pgagent_job_listeners = {}
 
 
 JobView.register_node_view(blueprint)
