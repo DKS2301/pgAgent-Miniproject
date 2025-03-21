@@ -21,7 +21,6 @@ let webpackShimConfig = {
   // Map module id to file path used in 'define(['baseurl', 'misc']). It is
   // used by webpack while creating bundle
   resolveAlias: {
-    'jquery': path.resolve(__dirname, 'node_modules/jquery/dist/jquery.min.js'),
     'top': path.join(__dirname, './pgadmin/'),
     'bundled_browser': path.join(__dirname, './pgadmin/static/bundle/browser'),
     'sources': path.join(__dirname, './pgadmin/static/js/'),
@@ -32,6 +31,9 @@ let webpackShimConfig = {
     'pgbrowser': path.join(__dirname, './pgadmin/browser/static/js/'),
     'security.pages': path.join(__dirname, './pgadmin/static/js/SecurityPages/index.jsx'),
 
+    // Added explicit mapping for socket_instance.js
+    'socket_instance': path.join(__dirname, './pgadmin/static/js/socket_instance'),
+    
     // Vendor JS
     'moment': path.join(__dirname, './node_modules/moment/moment'),
     'dropzone': path.join(__dirname, './node_modules/dropzone/dist/dropzone'),
@@ -49,8 +51,13 @@ let webpackShimConfig = {
     'stylis': path.join(__dirname, 'node_modules/stylis'),
     'popper.js': path.join(__dirname, 'node_modules/popper.js'),
 
-    //socket
+    // Enhanced Socket.IO mappings
     'socketio': path.join(__dirname, './node_modules/socket.io-client/dist/socket.io.js'),
+    'socket.io-client': path.join(__dirname, './node_modules/socket.io-client/dist/socket.io.js'),
+    'socket.io': path.join(__dirname, './node_modules/socket.io-client/dist/socket.io.js'),
+    'sources/socket_instance': path.join(__dirname, './pgadmin/static/js/socket_instance'),
+    'socket_io': path.join(__dirname, './node_modules/socket.io-client/dist/socket.io.js'),
+    'io': path.join(__dirname, './node_modules/socket.io-client/dist/socket.io.js'),
 
     'pgadmin.about': path.join(__dirname, './pgadmin/about/static/js/about'),
     'pgadmin.authenticate.kerberos': path.join(__dirname, './pgadmin/authenticate/static/js/kerberos'),

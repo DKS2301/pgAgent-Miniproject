@@ -11,8 +11,10 @@
 from functools import wraps
 import json
 from datetime import datetime, time
+import select
+import traceback
 
-from flask import render_template, request, jsonify
+from flask import app, render_template, request, jsonify, current_app
 from flask_babel import gettext as _
 
 from config import PG_DEFAULT_DRIVER
@@ -26,6 +28,14 @@ from pgadmin.utils.driver import get_driver
 from pgadmin.utils.preferences import Preferences
 from pgadmin.browser.server_groups.servers.pgagent.utils \
     import format_schedule_data, format_step_data
+from pgadmin import socketio
+
+# Define the SocketIO namespace for pgAgent
+SOCKETIO_NAMESPACE = '/pgagent'
+
+# Dictionary to store server's active listeners
+# Format: {server_id: {conn_id: connection}}
+active_listeners = {}
 
 
 class JobModule(CollectionNodeModule):
@@ -122,15 +132,447 @@ SELECT EXISTS(
         from .steps import blueprint as module
         self.submodules.append(module)
 
-        # Import and register the job_status_socket module
-        from .job_status_socket import blueprint as job_status_socket_module
-        self.submodules.append(job_status_socket_module)
-
         super().register(app, options)
 
 
+# SocketIO event handlers for pgAgent job status updates
+@socketio.on('connect', namespace=SOCKETIO_NAMESPACE)
+def pgagent_connect(auth=None):
+    """
+    Event handler for client connection
+    """
+    current_app.logger.info('[SocketIO pgAgent] Client connected with ID: %s', request.sid)
+    current_app.logger.debug('[SocketIO pgAgent] Connection headers: %s', request.headers)
+    current_app.logger.debug('[SocketIO pgAgent] Connection details: Transport=%s, Remote=%s', 
+                    getattr(request, 'connection', {}).get('transport', None),
+                    request.remote_addr)
+    
+    try:
+        # Emit the connected event to acknowledge the connection
+        socketio.emit('connected', {
+            'sid': request.sid,
+            'message': 'Successfully connected to pgAgent Socket.IO server',
+            'timestamp': datetime.now().isoformat(),
+            'server_info': {
+                'version': current_app.config.get('APP_VERSION', 'unknown'),
+                'namespace': SOCKETIO_NAMESPACE
+            }
+        }, namespace=SOCKETIO_NAMESPACE, to=request.sid)
+        current_app.logger.debug('[SocketIO pgAgent] Connected event emitted to client %s', request.sid)
+    except Exception as e:
+        current_app.logger.error('[SocketIO pgAgent] Error sending connected event: %s', str(e))
+        current_app.logger.error('[SocketIO pgAgent] Exception details: %s', traceback.format_exc())
+
+
+@socketio.on('echo_test', namespace=SOCKETIO_NAMESPACE)
+def echo_test(data):
+    """
+    Simple echo handler for connection testing
+    """
+    current_app.logger.info('[SocketIO pgAgent] Received echo test: %s', str(data))
+    
+    # Echo the data back with a timestamp
+    response = {
+        'original': data,
+        'timestamp': datetime.now().isoformat(),
+        'server_time': datetime.now().strftime('%H:%M:%S')
+    }
+    
+    socketio.emit('echo_response', response, namespace=SOCKETIO_NAMESPACE, to=request.sid)
+    current_app.logger.info('[SocketIO pgAgent] Sent echo response to %s', request.sid)
+    return response
+
+
+@socketio.on('start_job_status_listener', namespace=SOCKETIO_NAMESPACE)
+def start_job_status_listener(data):
+    """
+    Start listening for job status updates from PostgreSQL
+    """
+    current_app.logger.info('📢[SocketIO pgAgent] Starting job status listener for client: %s', request.sid)
+    current_app.logger.debug('📢[SocketIO pgAgent] Request data: %s', str(data))
+    
+    try:
+        sid = data.get('sid')
+        if not sid:
+            current_app.logger.warning('📢[SocketIO pgAgent] Server ID not provided for job status listener')
+            socketio.emit('job_status_listener_error', 
+                         'Server ID is required',
+                         namespace=SOCKETIO_NAMESPACE, 
+                         to=request.sid)
+            return
+
+        current_app.logger.debug('📢[SocketIO pgAgent] Getting connection manager for server ID: %s', sid)
+        
+        # Get the connection manager for this server
+        manager = get_driver(PG_DEFAULT_DRIVER).connection_manager(sid)
+        if not manager:
+            current_app.logger.error('📢[SocketIO pgAgent] Connection manager not found for server ID: %s', sid)
+            socketio.emit('job_status_listener_error', 
+                         'Connection manager not found',
+                         namespace=SOCKETIO_NAMESPACE, 
+                         to=request.sid)
+            return
+            
+        current_app.logger.debug('📢[SocketIO pgAgent] Getting database connection for server ID: %s', sid)
+        conn = manager.connection()
+        
+        # Check if connection is valid
+        if not conn or not conn.connected():
+            current_app.logger.error('📢[SocketIO pgAgent] Database connection is not valid for server: %s', sid)
+            current_app.logger.debug('📢[SocketIO pgAgent] Connection status: %s', 
+                           'None' if not conn else conn.status_message())
+            socketio.emit('job_status_listener_error', 
+                         'Database connection is not valid',
+                         namespace=SOCKETIO_NAMESPACE, 
+                         to=request.sid)
+            return
+        
+        current_app.logger.debug('📢[SocketIO pgAgent] Setting up LISTEN for job_status_update on server: %s', sid)
+        
+        # Setup LISTEN for job status updates
+        try:
+            status, result = conn.execute_void("LISTEN job_status_update")
+            current_app.logger.info('📢[SocketIO pgAgent] LISTEN command issued for job_status_update on server: %s (Status: %s)', 
+                          sid, status)
+            if not status:
+                current_app.logger.error('📢[SocketIO pgAgent] Failed to execute LISTEN command: %s', str(result))
+                socketio.emit('job_status_listener_error', 
+                             'Failed to execute LISTEN command',
+                             namespace=SOCKETIO_NAMESPACE, 
+                             to=request.sid)
+                return
+        except Exception as e:
+            current_app.logger.error('📢[SocketIO pgAgent] Exception while setting up LISTEN: %s', str(e))
+            current_app.logger.error('📢[SocketIO pgAgent] Exception details: %s', str(e.__traceback__))
+            socketio.emit('job_status_listener_error', 
+                         'Exception while setting up LISTEN: ' + str(e),
+                         namespace=SOCKETIO_NAMESPACE, 
+                         to=request.sid)
+            return
+        
+        # Store the connection to track active listeners
+        current_app.logger.debug('📢[SocketIO pgAgent] Storing connection in active listeners dict')
+        if sid not in active_listeners:
+            active_listeners[sid] = {}
+        
+        active_listeners[sid][request.sid] = conn
+        current_app.logger.info('📢[SocketIO pgAgent] Added client %s to active listeners for server %s', 
+                      request.sid, sid)
+        current_app.logger.debug('📢[SocketIO pgAgent] Current active listeners: %s', 
+                       str({k: list(v.keys()) for k, v in active_listeners.items()}))
+        
+        # Start background task to check for notifications
+        current_app.logger.debug('📢[SocketIO pgAgent] Starting background task to check for notifications')
+        socketio.start_background_task(
+            target=check_job_status_notifications,
+            sid=sid,
+            client_sid=request.sid
+        )
+        
+        socketio.emit('job_status_listener_started', 
+                     {'sid': sid},
+                     namespace=SOCKETIO_NAMESPACE, 
+                     to=request.sid)
+        current_app.logger.info('📢[SocketIO pgAgent] Job status listener started for client %s on server %s', 
+                      request.sid, sid)
+    except Exception as e:
+        current_app.logger.error('📢[SocketIO pgAgent] Unexpected error starting job status listener: %s', str(e))
+        current_app.logger.error('📢[SocketIO pgAgent] Exception details: %s', traceback.format_exc())
+        socketio.emit('job_status_listener_error', 
+                     'Unexpected error: ' + str(e),
+                     namespace=SOCKETIO_NAMESPACE, 
+                     to=request.sid)
+
+
+@socketio.on('stop_job_status_listener', namespace=SOCKETIO_NAMESPACE)
+def stop_job_status_listener(data):
+    """
+    Stop listening for job status updates for this client
+    """
+    current_app.logger.info('📢[SocketIO pgAgent] Stopping job status listener for client: %s', request.sid)
+    current_app.logger.debug('📢[SocketIO pgAgent] Request data: %s', str(data))
+    
+    try:
+        sid = data.get('sid')
+        if not sid:
+            current_app.logger.warning('📢[SocketIO pgAgent] No server ID provided for stop_job_status_listener')
+            return
+            
+        current_app.logger.debug('📢[SocketIO pgAgent] Active listeners before stopping: %s', 
+                       str({k: list(v.keys()) for k, v in active_listeners.items()}))
+            
+        if sid not in active_listeners:
+            current_app.logger.debug('📢[SocketIO pgAgent] No active listeners found for server: %s', sid)
+            return
+            
+        if request.sid in active_listeners[sid]:
+            conn = active_listeners[sid][request.sid]
+            try:
+                current_app.logger.debug('📢[SocketIO pgAgent] Issuing UNLISTEN command for server: %s', sid)
+                status, result = conn.execute_void("UNLISTEN job_status_update")
+                current_app.logger.info('📢[SocketIO pgAgent] UNLISTEN command issued for job_status_update on server: %s (Status: %s)', 
+                              sid, status)
+                if not status:
+                    current_app.logger.warning('📢[SocketIO pgAgent] Failed to execute UNLISTEN command: %s', str(result))
+            except Exception as e:
+                current_app.logger.warning('📢[SocketIO pgAgent] Error issuing UNLISTEN command: %s', str(e))
+                current_app.logger.debug('📢[SocketIO pgAgent] Exception details: %s', traceback.format_exc())
+                
+            del active_listeners[sid][request.sid]
+            current_app.logger.info('📢[SocketIO pgAgent] Removed client %s from active listeners for server %s', 
+                          request.sid, sid)
+            
+            # Clean up if no more listeners for this server
+            if not active_listeners[sid]:
+                del active_listeners[sid]
+                current_app.logger.info('📢[SocketIO pgAgent] No more active listeners for server %s, removed server entry', sid)
+                
+        current_app.logger.debug('📢[SocketIO pgAgent] Active listeners after stopping: %s', 
+                       str({k: list(v.keys()) for k, v in active_listeners.items()}))
+                
+        socketio.emit('job_status_listener_stopped', 
+                     {'sid': sid},
+                     namespace=SOCKETIO_NAMESPACE, 
+                     to=request.sid)
+        current_app.logger.info('📢[SocketIO pgAgent] Job status listener stopped for client %s on server %s', 
+                      request.sid, sid)
+    except Exception as e:
+        current_app.logger.error('📢[SocketIO pgAgent] Error stopping job status listener: %s', str(e))
+        app.logger.error('📢[SocketIO pgAgent] Exception details: %s', traceback.format_exc())
+        socketio.emit('job_status_listener_error', 
+                     'Error stopping listener: ' + str(e),
+                     namespace=SOCKETIO_NAMESPACE, 
+                     to=request.sid)
+
+
+@socketio.on('disconnect', namespace=SOCKETIO_NAMESPACE)
+def handle_client_disconnect():
+    """
+    Clean up when client disconnects
+    """
+    current_app.logger.info('📢[SocketIO pgAgent] Client disconnected from pgAgent socket: %s', request.sid)
+    
+    try:
+        # Track if we found any active listeners for this client
+        found_listeners = False
+        
+        current_app.logger.debug('📢[SocketIO pgAgent] Active listeners before disconnect cleanup: %s', 
+                       str({k: list(v.keys()) for k, v in active_listeners.items()}))
+        
+        for sid in list(active_listeners.keys()):
+            if request.sid in active_listeners[sid]:
+                found_listeners = True
+                app.logger.info('📢[SocketIO pgAgent] Found active listener for client %s on server %s, cleaning up', 
+                              request.sid, sid)
+                
+                try:
+                    conn = active_listeners[sid][request.sid]
+                    if conn and conn.connected():
+                        try:
+                            app.logger.debug('📢[SocketIO pgAgent] Issuing UNLISTEN command on disconnect for server: %s', sid)
+                            status, result = conn.execute_void("UNLISTEN job_status_update")
+                            app.logger.info('📢[SocketIO pgAgent] UNLISTEN command issued on disconnect for server: %s (Status: %s)', 
+                                          sid, status)
+                            if not status:
+                                app.logger.warning('📢[SocketIO pgAgent] Failed to execute UNLISTEN command on disconnect: %s', 
+                                                 str(result))
+                        except Exception as e:
+                            app.logger.warning('📢[SocketIO pgAgent] Error issuing UNLISTEN command on disconnect: %s', str(e))
+                            app.logger.debug('📢[SocketIO pgAgent] Exception details: %s', traceback.format_exc())
+                    else:
+                        app.logger.debug('📢[SocketIO pgAgent] Connection already closed for client %s, server %s', 
+                                       request.sid, sid)
+                except Exception as e:
+                    app.logger.warning('📢[SocketIO pgAgent] Error accessing connection on disconnect: %s', str(e))
+                
+                finally:
+                    # Always remove the client from active listeners
+                    del active_listeners[sid][request.sid]
+                    app.logger.info('📢[SocketIO pgAgent] Removed client %s from active listeners for server %s on disconnect', 
+                                  request.sid, sid)
+                    
+                    # Clean up server entry if no more clients are listening
+                    if not active_listeners[sid]:
+                        del active_listeners[sid]
+                        app.logger.info('📢[SocketIO pgAgent] No more active listeners for server %s, removed server entry', sid)
+        
+        if not found_listeners:
+            app.logger.debug('📢[SocketIO pgAgent] No active listeners found for disconnecting client %s', request.sid)
+            
+        app.logger.debug('📢[SocketIO pgAgent] Active listeners after disconnect cleanup: %s', 
+                       str({k: list(v.keys()) for k, v in active_listeners.items()}))
+                       
+    except Exception as e:
+        app.logger.error('📢[SocketIO pgAgent] Unexpected error in disconnect handler: %s', str(e))
+        app.logger.error('📢[SocketIO pgAgent] Exception details: %s', traceback.format_exc())
+
+
+def check_job_status_notifications(sid, client_sid):
+    """
+    Background task to check for notifications and emit them to the client
+    """
+    app.logger.info('📢[SocketIO pgAgent] Starting notification checker for client %s, server %s', 
+                  client_sid, sid)
+    
+    try:
+        # Validate active listener exists
+        if sid not in active_listeners or client_sid not in active_listeners[sid]:
+            app.logger.warning('📢[SocketIO pgAgent] No active listener found for client %s, server %s', 
+                             client_sid, sid)
+            return
+            
+        conn = active_listeners[sid][client_sid]
+        
+        if not conn or not conn.connected():
+            app.logger.error('📢[SocketIO pgAgent] Connection not valid for notification checker')
+            return
+            
+        app.logger.debug('📢[SocketIO pgAgent] Starting notification loop for client %s, server %s', 
+                       client_sid, sid)
+        
+        # Count notifications for logging
+        notification_count = 0
+        last_activity_time = datetime.now()
+        
+        # Continue as long as the connection is active and client is still connected
+        while sid in active_listeners and client_sid in active_listeners[sid] and \
+              conn.connected() and socketio.server.manager.is_connected(client_sid, namespace=SOCKETIO_NAMESPACE):
+            
+            # Log periodic status updates
+            current_time = datetime.now()
+            time_diff = (current_time - last_activity_time).total_seconds()
+            if time_diff > 60:  # Log status every minute
+                app.logger.debug('📢[SocketIO pgAgent] Notification checker still active for client %s, server %s. ' 
+                               'Notifications received so far: %d', 
+                               client_sid, sid, notification_count)
+                last_activity_time = current_time
+                
+            try:
+                # Check for notifications using select with a timeout
+                app.logger.debug('📢[SocketIO pgAgent] Checking for notifications from PostgreSQL')
+                if conn.poll() == 1:
+                    try:
+                        notify = conn.get_notification()
+                        
+                        while notify:
+                            app.logger.debug('📢[SocketIO pgAgent] Received notification: %s', str(notify))
+                            
+                            # Process the notification if it is a job status update
+                            if notify.channel == 'job_status_update':
+                                notification_count += 1
+                                try:
+                                    # Parse the payload as JSON
+                                    payload = json.loads(notify.payload)
+                                    app.logger.info('📢[SocketIO pgAgent] Job status update received: %s', str(payload))
+                                    
+                                    # Emit the update to the client
+                                    socketio.emit('job_status_update', 
+                                                 payload,
+                                                 namespace=SOCKETIO_NAMESPACE, 
+                                                 to=client_sid)
+                                    app.logger.debug('📢[SocketIO pgAgent] Job status update emitted to client %s', 
+                                                   client_sid)
+                                except json.JSONDecodeError:
+                                    app.logger.error('📢[SocketIO pgAgent] Invalid JSON in notification payload: %s', 
+                                                   notify.payload)
+                                except Exception as e:
+                                    app.logger.error('📢[SocketIO pgAgent] Error processing notification: %s', str(e))
+                                    app.logger.debug('📢[SocketIO pgAgent] Exception details: %s', traceback.format_exc())
+                            
+                            # Get the next notification if available
+                            notify = conn.get_notification()
+                    except Exception as e:
+                        app.logger.error('📢[SocketIO pgAgent] Error retrieving notification: %s', str(e))
+                        app.logger.debug('📢[SocketIO pgAgent] Exception details: %s', traceback.format_exc())
+                
+                # Sleep briefly to avoid high CPU usage
+                socketio.sleep(0.5)
+                
+            except Exception as e:
+                app.logger.error('📢[SocketIO pgAgent] Error in notification loop: %s', str(e))
+                app.logger.debug('📢[SocketIO pgAgent] Exception details: %s', traceback.format_exc())
+                socketio.sleep(1)  # Sleep a bit longer after an error
+        
+        app.logger.info('📢[SocketIO pgAgent] Notification checker ending for client %s, server %s. ' 
+                      'Total notifications: %d. Connection state: %s', 
+                      client_sid, sid, notification_count, 
+                      'Connected' if conn and conn.connected() else 'Disconnected')
+                      
+    except Exception as e:
+        app.logger.error('📢[SocketIO pgAgent] Unexpected error in notification checker: %s', str(e))
+        app.logger.error('📢[SocketIO pgAgent] Exception details: %s', traceback.format_exc())
+
 
 blueprint = JobModule(__name__)
+
+# Add a diagnostic endpoint for active listeners
+@blueprint.route('/debug/active_listeners/', methods=['GET'])
+def get_active_listeners():
+    """
+    Return information about all active Socket.IO listeners for pgAgent
+    This is useful for debugging Socket.IO connection issues
+    """
+    from flask import current_app
+    
+    # Only allow in DEBUG mode
+    if not current_app.debug:
+        return make_json_response(
+            success=0,
+            errormsg="This endpoint is only available in DEBUG mode"
+        )
+    
+    listener_info = {}
+    try:
+        # Collect information about active listeners
+        for server_id, clients in active_listeners.items():
+            listener_info[server_id] = {
+                'client_count': len(clients),
+                'clients': []
+            }
+            
+            for client_id, conn in clients.items():
+                connection_status = 'unknown'
+                if conn:
+                    try:
+                        connection_status = 'connected' if conn.connected() else 'disconnected'
+                    except Exception as e:
+                        connection_status = f'error: {str(e)}'
+                
+                # Get socketio client info
+                socket_connected = False
+                try:
+                    socket_connected = socketio.server.manager.is_connected(
+                        client_id, namespace=SOCKETIO_NAMESPACE
+                    )
+                except Exception as e:
+                    current_app.logger.error(
+                        f'📢[SocketIO pgAgent] Error checking client connection: {str(e)}'
+                    )
+                
+                listener_info[server_id]['clients'].append({
+                    'client_id': client_id,
+                    'db_connection_status': connection_status,
+                    'socket_connected': socket_connected,
+                    'timestamp': datetime.now().isoformat()
+                })
+        
+        # Add global SocketIO stats
+        listener_info['_socketio_stats'] = {
+            'connected_clients': len(socketio.server.manager.get_participants(SOCKETIO_NAMESPACE)),
+            'total_server_clients': socketio.server.manager.socket_count,
+        }
+        
+        return make_json_response(
+            data=listener_info,
+            status=200
+        )
+    except Exception as e:
+        current_app.logger.error(f'📢[SocketIO pgAgent] Error in diagnostic endpoint: {str(e)}')
+        current_app.logger.error(f'📢[SocketIO pgAgent] Exception details: {traceback.format_exc()}')
+        return make_json_response(
+            success=0,
+            errormsg=f"Error collecting listener information: {str(e)}"
+        )
 
 
 class JobView(PGChildNodeView):

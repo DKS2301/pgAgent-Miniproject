@@ -10,6 +10,7 @@
 """The main pgAdmin module. This handles the application initialisation tasks,
 such as setup of logging, dynamic loading of modules etc."""
 import logging
+from logging import config
 import os
 import sys
 import re
@@ -67,9 +68,31 @@ winreg = None
 if os.name == 'nt':
     import winreg
 
-socketio = SocketIO(manage_session=False, async_mode='threading',
-                    logger=False, engineio_logger=False, debug=False,
-                    ping_interval=25, ping_timeout=120)
+# Set up socketio with more detailed logging when in debug mode
+socketio_kwargs = {
+    'manage_session': False, 
+    'async_mode': 'threading',
+    'logger': False, 
+    'engineio_logger': False, 
+    'debug': False,
+    'ping_interval': 25, 
+    'ping_timeout': 120,
+}
+
+# When in debug mode, enable socket.io logging
+if getattr(config, 'DEBUG', False):
+    import logging
+    socketio_logger = logging.getLogger('socketio')
+    socketio_logger.setLevel(logging.DEBUG)
+    engineio_logger = logging.getLogger('engineio')
+    engineio_logger.setLevel(logging.DEBUG)
+    socketio_kwargs.update({
+        'logger': True,
+        'engineio_logger': True,
+        'debug': True,
+    })
+
+socketio = SocketIO(**socketio_kwargs)
 
 _INDEX_PATH = 'browser.index'
 
