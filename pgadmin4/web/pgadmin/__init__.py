@@ -22,15 +22,15 @@ from types import MethodType
 from collections import defaultdict
 from importlib import import_module
 
-from flask import Flask, abort, request, current_app, session, url_for
-from flask_socketio import SocketIO
+from flask import Flask, abort, request, current_app, session, url_for, jsonify
+from flask_socketio import SocketIO, emit
 from werkzeug.exceptions import HTTPException
 from flask_babel import Babel, gettext
 from flask_babel import gettext as _
-from flask_login import user_logged_in, user_logged_out
+from flask_login import user_logged_in, user_logged_out, current_user
 from flask_mail import Mail
 from flask_paranoid import Paranoid
-from flask_security import Security, SQLAlchemyUserDatastore, current_user
+from flask_security import Security, SQLAlchemyUserDatastore
 from flask_security.utils import login_user, logout_user
 from flask_migrate import Migrate
 from werkzeug.datastructures import ImmutableDict
@@ -967,4 +967,95 @@ def create_app(app_name=None):
     # All done!
     ##########################################################################
     socketio.init_app(app, cors_allowed_origins="*")
+    
+    # Setup Socket.IO event handlers to monitor connections
+    @socketio.on('connect')
+    def handle_connect():
+        app.logger.info('📢Socket.IO client connected: %s', request.sid)
+        
+    @socketio.on('disconnect')
+    def handle_disconnect():
+        app.logger.info('📢Socket.IO client disconnected: %s', request.sid)
+    
+    @socketio.on('subscribe')
+    def handle_subscribe(data):
+        namespace = data.get('namespace')
+        app.logger.info('📢Client %s subscribing to namespace: %s', request.sid, namespace)
+        if namespace:
+            # Here you could add the client to a room for targeted events
+            return {'status': 'ok', 'namespace': namespace}
+        return {'status': 'error', 'message': 'No namespace specified'}
+    
+    @socketio.on('echo_test')
+    def handle_echo(data):
+        app.logger.info('Echo test from client %s: %s', request.sid, data)
+        # Echo back the data
+        emit('echo_response', {
+            'server_time': datetime.now().isoformat(),
+            'received_data': data,
+            'sid': request.sid
+        })
+    
+    # Namespace-prefixed event handlers for Socket.IO v4+
+    @socketio.on('pgagent:subscribe')
+    def handle_pgagent_subscribe(data):
+        server_id = data.get('server_id')
+        app.logger.info('📢Client %s subscribing to pgagent events for server: %s', 
+                       request.sid, server_id)
+        return {'status': 'ok', 'server_id': server_id}
+    
+    @socketio.on('pgagent:echo')
+    def handle_pgagent_echo(data):
+        app.logger.info('📢pgagent:echo from client %s: %s', request.sid, data)
+        emit('pgagent:echo_response', {
+            'server_time': datetime.now().isoformat(),
+            'received_data': data,
+            'sid': request.sid
+        })
+    
+    # Add a diagnostic endpoint to check Socket.IO connections (for admins only)
+    @app.route('/socket-status')
+    def socket_status():
+        # Only allow in DEBUG mode or for authenticated admin users
+        if not (config.DEBUG or 
+                (current_user.is_authenticated and current_user.has_role("Administrator"))):
+            abort(403)
+            
+        # Get connected clients from Socket.IO
+        connected_clients = []
+        if hasattr(socketio, 'server') and hasattr(socketio.server, 'eio'):
+            for sid, socket in socketio.server.eio.sockets.items():
+                client_info = {
+                    'sid': sid,
+                    'transport': getattr(socket, 'transport', 'unknown'),
+                    'connected_at': getattr(socket, 'connected_at', 'unknown'),
+                    'client_address': getattr(socket, 'client_address', 'unknown')
+                }
+                connected_clients.append(client_info)
+                
+        return jsonify({
+            'active_connections': len(connected_clients),
+            'clients': connected_clients,
+            'debug': config.DEBUG
+        })
+        
+    # Add a route for admin-triggered Socket.IO diagnostics
+    @app.route('/socket-test')
+    def socket_test():
+        # Only allow in DEBUG mode or for authenticated admin users
+        if not (config.DEBUG or 
+                (current_user.is_authenticated and current_user.has_role("Administrator"))):
+            abort(403)
+            
+        # Emit a test event to all connected clients
+        socketio.emit('server_diagnostic', {
+            'timestamp': datetime.now().isoformat(),
+            'message': 'Server-initiated diagnostic test'
+        })
+        
+        return jsonify({
+            'success': True,
+            'message': 'Diagnostic event emitted to all clients'
+        })
+
     return app

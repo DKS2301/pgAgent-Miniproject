@@ -58,7 +58,7 @@ socket_io.connect = function(namespace, options) {
   
   try {
     const socketUrl = namespace.startsWith('/') ? namespace : '/' + namespace;
-    console.log('[Socket.IO] Creating socket connection via io.connect to:', socketUrl);
+    console.log('[Socket.IO] Creating socket connection via io.connect to:', socketUrl, `\t url is ${url_for('pgadmin.root')}/socket.io`);
     
     const socketObj = socket_io(socketUrl, {
       path: `${url_for('pgadmin.root')}/socket.io`,

@@ -16,6 +16,32 @@ import url_for from 'sources/url_for';
 // Import socket.io-client directly for backup use only
 import { io as socket_io } from 'socket.io-client';
 
+/* 
+ * SOCKET.IO IMPROVEMENTS - JOB STATUS LISTENER
+ * 
+ * This module implements the pgAgent job status listener using Socket.IO.
+ * 
+ * Key features:
+ * 1. Robust socket connection handling with proper error recovery
+ * 2. Auto-reconnection with configurable timeout and retry parameters
+ * 3. Keep-alive mechanism to prevent premature disconnection
+ * 4. Comprehensive diagnostic tools for troubleshooting
+ * 5. Proper server ID handling for PostgreSQL LISTEN/NOTIFY
+ * 
+ * The diagnostic tools (pgAgentSocketDiagnostics) provide functions to:
+ * - Check socket environment and configuration
+ * - Test direct socket connections
+ * - Validate Socket.IO URLs and namespace setup
+ * - Check Socket.IO module availability
+ * - Fix common connection issues automatically
+ * - Verify server-side connection status
+ * - Request test events from the server
+ * - Check job status listener initialization
+ * 
+ * To use diagnostic tools in browser console:
+ *   pgAgentSocketDiagnostics.help()
+ */
+
 define('pgadmin.node.pga_job', [
   'sources/gettext', 'sources/url_for', 'pgadmin.browser',
   'pgadmin.node.pga_jobstep', 'pgadmin.node.pga_schedule',
@@ -78,7 +104,7 @@ define('pgadmin.node.pga_job', [
         }
         console.log('[pgAgent] io global available:', typeof socket_io);
         console.log('[pgAgent] url_for available:', typeof url_for);
-        
+
         pgBrowser.add_menus([{
           name: 'create_pga_job_on_coll', node: 'coll-pga_job', module: this,
           applies: ['object', 'context'], callback: 'show_obj_properties',
@@ -274,37 +300,7 @@ define('pgadmin.node.pga_job', [
             }
           }
         );
-        
-        // Fall back to directly monitor tree.select event
-        if (pgBrowser.tree) {
-          pgBrowser.tree.onSelect(function() {
-            try {
-              console.log('Tree selected event triggered');
-              const selectedNode = pgBrowser.tree.selected();
-              if (!selectedNode) return;
-              
-              const data = pgBrowser.tree.itemData(selectedNode);
-              if (data && data._type === 'coll-pga_job') {
-                console.log('pgagent collection node selected via tree.selected event');
                 
-                // Get the server ID from the parent node
-                const serverItem = pgBrowser.tree.parent(selectedNode);
-                const serverData = serverItem ? pgBrowser.tree.itemData(serverItem) : null;
-                
-                if (serverData && serverData._type === 'server' && serverData._id) {
-                  // Connect to socket and start listening for job status updates
-                  console.log('Connecting to socket for server:', serverData.name || serverData._id);
-                  self.connectJobStatusSocket(serverData._id);
-                }
-              }
-            } catch (e) {
-              console.error('Error in tree.selected event handler:', e);
-            }
-          });
-        } else {
-          console.error('Cannot set up tree.selected event handler: pgBrowser.tree is null');
-        }
-        
         // Monitor when nodes are closed/collapsed
         pgBrowser.Events.on(
           'pgadmin-browser:tree:closed',
@@ -331,210 +327,392 @@ define('pgadmin.node.pga_job', [
       connectJobStatusSocket: function(serverId) {
         var self = this;
         
-        if (!self.socket) {
-          console.log('[pgAgent] Setting up new Socket.IO connection for job status updates');
-          try {
-            // Get the full base URL for the socket connection - ensuring we have protocol, host and port
-            const baseUrl = window.location.origin;
-            const pgAdminPath = url_for('pgadmin.root').replace(/\/$/, '');
-            const pgAgentSocketUrl = baseUrl + '/pgagent';
-            
-            console.log('[pgAgent] Constructing socket URL:', pgAgentSocketUrl);
-            console.log('[pgAgent] Using socket.io path:', '/socket.io');
-            
-            // First try to use the imported socket_instance, which should have both io and openSocket
-            if (socket_instance) {
-              console.log('[pgAgent] Using socket_instance to connect to:', pgAgentSocketUrl);
-              
-              if (socket_instance.io) {
-                // Method 1: Use socket_instance.io directly
-                console.log('[pgAgent] Using socket_instance.io.connect() method');
-                self.socket = socket_instance.io.connect(pgAgentSocketUrl, {
-                  path: '/socket.io',
-                  transports: ['websocket', 'polling'],
-                  reconnection: true,
-                  reconnectionDelay: 1000,
-                  reconnectionDelayMax: 5000,
-                  reconnectionAttempts: 5,
-                  timeout: 10000
-                });
-              } else if (socket_instance.openSocket) {
-                // Method 2: Use the openSocket promise
-                console.log('[pgAgent] Using socket_instance.openSocket() method');
-                socket_instance.openSocket(pgAgentSocketUrl, {
-                  path: '/socket.io',
-                  transports: ['websocket', 'polling'],
-                  reconnection: true,
-                  reconnectionDelay: 1000,
-                  reconnectionDelayMax: 5000,
-                  reconnectionAttempts: 5,
-                  timeout: 10000
-                }).then(function(sock) {
-                  self.socket = sock;
-                  console.log('[pgAgent] Socket connected via openSocket promise with ID:', self.socket.id);
-                  self.setupSocketEventHandlers();
-                }).catch(function(err) {
-                  console.error('[pgAgent] openSocket promise failed:', err);
-                  // Try the direct method as a fallback
-                  self.connectWithDirectIO(pgAgentSocketUrl);
-                });
-                return; // Early return since we're using the promise
-              } else {
-                console.error('[pgAgent] socket_instance is missing both io and openSocket methods');
-                self.connectWithDirectIO(pgAgentSocketUrl);
-              }
-            } else {
-              console.error('[pgAgent] socket_instance is not available');
-              self.connectWithDirectIO(pgAgentSocketUrl);
-            }
-            
-            // If we get here, we're using the synchronous connection methods (not the promise)
-            // so we need to set up event handlers
-            if (self.socket) {
-              self.setupSocketEventHandlers();
-            }
-          } catch (err) {
-            console.error('[pgAgent] Error setting up Socket.IO connection:', err);
+        try {
+          console.log('[pgAgent] Connecting job status socket...');
+          
+          // Store the server ID for later use
+          if (serverId) {
+            self.currentServerId = serverId;
           }
-        } else {
-          console.log('[pgAgent] Socket.IO already connected with ID:', self.socket.id);
+          
+          // First disconnect any existing socket
+          if (self.socket) {
+            self.disconnectJobStatusSocket();
+          }
+          
+          // Construct the socket URLs - Socket.IO requires just the namespace
+          const baseUrl = window.location.origin;
+          const pgAdminPath = url_for('pgadmin.root').replace(/\/$/, '');
+          // Use just the namespace name with leading slash for Socket.IO
+          const pgAgentNamespace = '/pgagent';
+          
+          console.log('[pgAgent] Connecting to namespace:', pgAgentNamespace);
+          console.log('[pgAgent] Using socket.io path:', pgAdminPath + '/socket.io');
+          console.log('[pgAgent] Current server ID:', self.currentServerId);
+          
+          // Define socket connection options
+          const socketOptions = {
+            path: pgAdminPath + '/socket.io',
+            reconnection: true,
+            reconnectionAttempts: 10,
+            reconnectionDelay: 1000,
+            reconnectionDelayMax: 5000,
+            randomizationFactor: 0.5,
+            timeout: 20000,
+            autoConnect: true,
+            // Force to use the correct namespace
+            forceNew: true
+          };
+
+          console.log('[pgAgent] Socket.IO options:', JSON.stringify(socketOptions));
+
+          // Try to use the global io first, then fallback to window.io
+          let socketManager;
+          try {
+            if (typeof io !== 'undefined') {
+              console.log('[pgAgent] Using global io');
+              socketManager = io;
+            } else if (window.io !== undefined) {
+              console.log('[pgAgent] Using window.io');
+              socketManager = window.io;
+            } else if (typeof socket_io !== 'undefined') {
+              console.log('[pgAgent] Using socket_io');
+              socketManager = socket_io;
+            } else {
+              console.error('[pgAgent] Socket.IO not available');
+              return false;
+            }
+
+            // Connect to the Socket.IO server using the correct namespace
+            if (self.socket && self.socket.connected) {
+              console.log('[pgAgent] Disconnecting existing socket');
+              self.disconnectJobStatusSocket();
+            }
+
+            // Important: We're using manually constructed URL to ensure namespace is correct
+            console.log('[pgAgent] Attempting connection with explicit namespace: ' + pgAgentNamespace);
+            self.socket = socketManager(pgAgentNamespace, socketOptions);
+            
+            if (!self.socket) {
+              console.error('[pgAgent] Failed to create socket instance');
+              return false;
+            }
+            
+            // Set a custom property to track the namespace
+            self.socket._pgAgentNamespace = pgAgentNamespace;
+            
+            // Set up event handlers for the socket
+            self.socket.on('connect', function() {
+              console.log('[pgAgent] Socket.IO connected successfully with ID: ' + self.socket.id);
+              console.log('[pgAgent] Socket.IO namespace: ' + (self.socket.nsp?.name || self.socket._pgAgentNamespace || '(unknown)'));
+              
+              // Set the namespace explicitly if it's not set
+              if (!self.socket.nsp || !self.socket.nsp.name) {
+                console.log('[pgAgent] Socket namespace not detected, using custom tracking');
+                self.socket._pgAgentNamespace = pgAgentNamespace;
+              }
+              
+              // CRITICAL FIX: Start the job status listener with the server ID
+              if (self.currentServerId) {
+                console.log('[pgAgent] Starting job status listener for server ID:', self.currentServerId);
+                self.socket.emit('start_job_status_listener', { 
+                  sid: self.currentServerId,
+                  client_info: {
+                    client_id: self.socket.id,
+                    timestamp: new Date().toISOString()
+                  }
+                });
+                console.log('[pgAgent] Job status listener start request sent for server ID:', self.currentServerId);
+              } else {
+                console.error('[pgAgent] Cannot start job status listener - no server ID available');
+              }
+              
+              // Start the keep-alive ping if it exists
+              if (typeof self.startKeepAlivePing === 'function') {
+                self.startKeepAlivePing();
+              }
+            });
+            
+            // Handle success event for job status listener start
+            self.socket.on('job_status_listener_started', function(data) {
+              console.log('[pgAgent] Job status listener started:', data);
+              self._jobStatusListenerActive = true;
+              
+              // If diagnostics exist, update the status
+              if (window.pgAgentSocketDiagnostics && window.pgAgentSocketDiagnostics.status) {
+                window.pgAgentSocketDiagnostics.status.listenerActive = true;
+                window.pgAgentSocketDiagnostics.status.listenerStartTime = new Date().toISOString();
+                window.pgAgentSocketDiagnostics.status.checks.push({
+                  type: 'listener_started',
+                  timestamp: new Date().toISOString(),
+                  data: data
+                });
+              }
+            });
+            
+            // Handle error event for job status listener
+            self.socket.on('job_status_listener_error', function(data) {
+              console.error('[pgAgent] Job status listener error:', data);
+              self._jobStatusListenerActive = false;
+              
+              // If diagnostics exist, update the status
+              if (window.pgAgentSocketDiagnostics && window.pgAgentSocketDiagnostics.status) {
+                window.pgAgentSocketDiagnostics.status.listenerActive = false;
+                window.pgAgentSocketDiagnostics.status.errors.push({
+                  type: 'listener_error',
+                  timestamp: new Date().toISOString(),
+                  error: data
+                });
+              }
+              
+              // Attempt to restart the listener after a delay
+              if (self.currentServerId) {
+                setTimeout(function() {
+                  if (self.socket && self.socket.connected) {
+                    console.log('[pgAgent] Attempting to restart job status listener...');
+                    self.socket.emit('start_job_status_listener', { 
+                      sid: self.currentServerId,
+                      client_info: {
+                        client_id: self.socket.id,
+                        timestamp: new Date().toISOString(),
+                        retry: true
+                      }
+                    });
+                  }
+                }, 5000); // 5 second delay before retry
+              }
+            });
+            
+            self.socket.on('connect_error', function(err) {
+              console.error('[pgAgent] Socket connection error:', err);
+              console.error('[pgAgent] Socket connection details:', {
+                namespace: pgAgentNamespace,
+                path: socketOptions.path,
+                uri: window.location.origin + socketOptions.path,
+                readyState: self.socket.io ? self.socket.io.readyState : 'unknown'
+              });
+              
+              // Try to diagnose common issues
+              if (err.message && err.message.includes('ETIMEDOUT')) {
+                console.error('[pgAgent] Connection timeout - check firewall or proxy settings');
+              } else if (err.message && err.message.includes('xhr poll error')) {
+                console.error('[pgAgent] XHR polling error - fallback transport failed');
+                // Try to force websocket transport on next attempt
+                socketOptions.transports = ['websocket'];
+              } else if (err.message && err.message.includes('websocket error')) {
+                console.error('[pgAgent] WebSocket transport error - trying to fall back to polling');
+                // Try to force polling on next attempt
+                socketOptions.transports = ['polling'];
+              }
+            });
+            
+            self.socket.on('error', function(err) {
+              console.error('[pgAgent] Socket error:', err);
+            });
+            
+            self.socket.on('disconnect', function(reason) {
+              console.log('[pgAgent] Socket disconnected:', reason);
+              self._jobStatusListenerActive = false;
+              
+              // Stop the keep-alive ping
+              self.stopKeepAlivePing();
+              
+              // Track disconnection reason for diagnostics
+              if (window.pgAgentSocketDiagnostics && window.pgAgentSocketDiagnostics.status) {
+                window.pgAgentSocketDiagnostics.status.lastDisconnectReason = reason;
+                window.pgAgentSocketDiagnostics.status.lastDisconnectTime = new Date().toISOString();
+                
+                // Add to error log if it was an unexpected disconnection
+                if (reason !== 'io client disconnect') {
+                  window.pgAgentSocketDiagnostics.status.errors.push({
+                    type: 'socket_disconnected',
+                    reason: reason,
+                    timestamp: new Date().toISOString()
+                  });
+                }
+              }
+            });
+            
+            self.socket.on('job_status_update', function(data) {
+              console.log('📢[pgAdmin pgAgent] Job status update received:', data);
+              
+              try {
+                if (!data) {
+                  console.error('📢[pgAdmin pgAgent] Invalid job status update - data is null or undefined');
+                  return;
+                }
+                
+                let statusData = data.status;
+                let serverId = data.sid;
+                let jobId = data.job_id;
+                
+                if (!statusData) {
+                  console.error('📢[pgAdmin pgAgent] Invalid job status update - missing status data');
+                  return;
+                }
+                
+                if (!serverId) {
+                  console.error('📢[pgAdmin pgAgent] Invalid job status update - missing server ID');
+                  return;
+                }
+                
+                // Log the notification details
+                console.log('📢[pgAdmin pgAgent] Processing job update for server:', serverId,
+                           'job:', jobId,
+                           'status:', statusData.status || 'unknown');
+                
+                // Call the refreshJobNode method with proper error handling
+                if (jobId) {
+                  self.refreshJobNode(serverId, jobId);
+                } else {
+                  console.warn('📢[pgAdmin pgAgent] Job ID missing in update, refreshing all jobs');
+                  self.refreshJobs(serverId);
+                }
+              } catch (e) {
+                console.error('📢[pgAdmin pgAgent] Error processing job status update:', e);
+                console.error('📢[pgAdmin pgAgent] Update data:', data);
+                
+                window.pgAgentSocketDiagnostics.status.errors.push({
+                  type: 'job_status_update_error',
+                  error: e.message,
+                  data: JSON.stringify(data),
+                  timestamp: new Date().toISOString()
+                });
+              }
+            });
+            
+            self.socket.on('reconnect', function(attemptNumber) {
+              console.log('[pgAgent] Socket.IO reconnected after', attemptNumber, 'attempts');
+              
+              // Reestablish job status listener after reconnection if we have a server ID
+              if (self.currentServerId) {
+                console.log('[pgAgent] Reestablishing job status listener for server ID:', self.currentServerId);
+                self.socket.emit('start_job_status_listener', { 
+                  sid: self.currentServerId,
+                  client_info: {
+                    client_id: self.socket.id,
+                    timestamp: new Date().toISOString(),
+                    reconnect: true
+                  }
+                });
+              }
+              
+              // Run a connection test after reconnection
+              if (window.pgAgentSocketDiagnostics && 
+                  typeof window.pgAgentSocketDiagnostics.testDirectConnection === 'function') {
+                setTimeout(function() {
+                  console.log('[pgAgent] Running connection test after reconnect event');
+                  window.pgAgentSocketDiagnostics.testDirectConnection();
+                }, 1000);
+              }
+            });
+            
+            console.log('[pgAgent] Socket event handlers set up successfully');
+            return true;
+          } catch (err) {
+            console.error('[pgAgent] Error connecting job status socket:', err);
+            return false;
+          }
+        } catch (err) {
+          console.error('[pgAgent] Error connecting job status socket:', err);
+          return false;
         }
       },
       
-      connectWithDirectIO: function(pgAgentSocketUrl) {
+      /* Start a keep-alive ping to prevent socket disconnection */
+      startKeepAlivePing: function() {
         var self = this;
-        console.log('[pgAgent] Trying direct socket_io connection to:', pgAgentSocketUrl);
         
-        try {
-          // Use fixed socket.io path
-          console.log('[pgAgent] Using socket.io path:', '/socket.io');
-          
-          // Fall back to direct socket.io-client import as a last resort
-          self.socket = socket_io(pgAgentSocketUrl, {
-            path: '/socket.io',
-            transports: ['websocket', 'polling'],
-            reconnection: true,
-            reconnectionDelay: 1000,
-            reconnectionDelayMax: 5000,
-            reconnectionAttempts: 5,
-            timeout: 10000
-          });
-          console.log('[pgAgent] Created socket with direct socket_io import');
-        } catch (err) {
-          console.error('[pgAgent] Direct socket_io connection failed:', err);
+        // Clear any existing interval
+        self.stopKeepAlivePing();
+        
+        // Set a new interval to ping the server every 30 seconds
+        self._keepAlivePingInterval = setInterval(function() {
+          if (self.socket && self.socket.connected) {
+            console.log('[pgAgent] Sending keep-alive ping');
+            self.socket.emit('ping', { 
+              timestamp: new Date().toISOString(),
+              client_id: self.socket.id
+            });
+          } else {
+            // Stop pinging if socket is disconnected
+            self.stopKeepAlivePing();
+          }
+        }, 30000); // 30 seconds
+        
+        console.log('[pgAgent] Started keep-alive ping with interval:', self._keepAlivePingInterval);
+      },
+      
+      /* Stop the keep-alive ping interval */
+      stopKeepAlivePing: function() {
+        var self = this;
+        
+        if (self._keepAlivePingInterval) {
+          console.log('[pgAgent] Stopping keep-alive ping interval:', self._keepAlivePingInterval);
+          clearInterval(self._keepAlivePingInterval);
+          self._keepAlivePingInterval = null;
         }
       },
 
-      setupSocketEventHandlers: function() {
+      refreshJobNodeIfNeeded: function(data) {
         var self = this;
         
-        if (!self.socket) {
-          console.error('[pgAgent] Cannot set up event handlers - socket is null');
+        if (!data || !data.job_id) {
+          console.warn('[pgAgent] Received job status update without job_id');
           return;
         }
         
-        console.log('[pgAgent] Setting up socket event handlers');
+        console.log('[pgAgent] Processing job status update:', data);
         
-        self.socket.on('connect', function() {
-          console.log('[pgAgent] Socket.IO connected successfully with ID:', self.socket.id);
-          
-          // Run a connection test after successful connection
-          if (window.pgAgentSocketDiagnostics && 
-              typeof window.pgAgentSocketDiagnostics.testDirectConnection === 'function') {
-            setTimeout(function() {
-              console.log('[pgAgent] Running connection test after connect event');
-              window.pgAgentSocketDiagnostics.testDirectConnection();
-            }, 1000);
-          }
-        });
+        // Make sure browser and tree are available
+        if (!pgBrowser || !pgBrowser.tree) {
+          console.warn('[pgAgent] Cannot refresh job node: browser or tree not available');
+          return;
+        }
         
-        self.socket.on('connect_error', function(err) {
-          console.error('[pgAgent] Socket.IO connection error:', err);
-        });
-        
-        self.socket.on('connect_timeout', function() {
-          console.error('[pgAgent] Socket.IO connection timeout');
-        });
-        
-        self.socket.on('error', function(err) {
-          console.error('[pgAgent] Socket.IO error:', err);
-        });
-        
-        self.socket.on('disconnect', function(reason) {
-          console.log('[pgAgent] Socket.IO disconnected, reason:', reason);
-        });
-        
-        self.socket.on('reconnect', function(attemptNumber) {
-          console.log('[pgAgent] Socket.IO reconnected after', attemptNumber, 'attempts');
-          
-          // Run a connection test after reconnection
-          if (window.pgAgentSocketDiagnostics && 
-              typeof window.pgAgentSocketDiagnostics.testDirectConnection === 'function') {
-            setTimeout(function() {
-              console.log('[pgAgent] Running connection test after reconnect event');
-              window.pgAgentSocketDiagnostics.testDirectConnection();
-            }, 1000);
-          }
-        });
-        
-        self.socket.on('reconnect_error', function(err) {
-          console.error('[pgAgent] Socket.IO reconnection error:', err);
-        });
-        
-        self.socket.on('job_status_update', function(data) {
-          // Handle job status updates
-          console.log('[pgAgent] Received job status update for job:', data.job_id);
-          
-          // Refresh job node if needed based on data received
-          try {
-            self.refreshJobNodeIfNeeded(data);
-          } catch (err) {
-            console.error('[pgAgent] Error handling job status update:', err);
-          }
-        });
-        
-        self.socket.on('echo_response', function(response) {
-          console.log('[pgAgent] Received echo response from server:', response);
-        });
-        
-        console.log('[pgAgent] Socket event handlers set up successfully');
-      },
-      
-      /* Disconnect from the Socket.IO server */
-      disconnectJobStatusSocket: function() {
-        var self = this;
-        
+        // Find the job node in the tree
         try {
-          console.log('[pgAgent] Attempting to disconnect job status socket');
+          // We need to find all job nodes that match the job_id
+          var treeRoot = pgBrowser.tree.rootNode();
+          var matchingNodes = [];
           
-          if (self.socket) {
-            if (self.socket.connected) {
-              console.log('[pgAgent] Socket is connected with ID:', self.socket.id, ' - disconnecting');
-              self.socket.disconnect();
-              console.log('[pgAgent] Socket disconnected successfully');
-            } else {
-              console.log('[pgAgent] Socket exists but is not connected - cleaning up reference');
+          // Function to recursively search for job nodes
+          function findJobNodes(node) {
+            if (!node) return;
+            
+            // Check if this is a job node with matching ID
+            if (node._type === 'pga_job' && 
+                node._id && 
+                node._id.toString() === data.job_id.toString()) {
+              matchingNodes.push(node);
             }
             
-            // Remove all listeners to prevent memory leaks
-            if (typeof self.socket.removeAllListeners === 'function') {
-              self.socket.removeAllListeners();
-              console.log('[pgAgent] Removed all socket event listeners');
+            // Check children
+            if (node.children) {
+              node.children.forEach(findJobNodes);
             }
-            
-            // Clear the socket reference
-            self.socket = null;
-            console.log('[pgAgent] Socket reference cleared');
-          } else {
-            console.log('[pgAgent] No active socket connection to disconnect');
           }
+          
+          // Start search from root
+          findJobNodes(treeRoot);
+          
+          if (matchingNodes.length === 0) {
+            console.log('[pgAgent] No matching job nodes found for job_id:', data.job_id);
+            return;
+          }
+          
+          // Refresh each matching node
+          matchingNodes.forEach(function(node) {
+            console.log('[pgAgent] Refreshing job node:', node._id);
+            pgBrowser.tree.refresh(node);
+          });
+          
+          console.log('[pgAgent] Refreshed', matchingNodes.length, 'job nodes for job_id:', data.job_id);
         } catch (err) {
-          console.error('[pgAgent] Error disconnecting job status socket:', err);
-          // Ensure socket reference is cleared even if an error occurs
-          self.socket = null;
+          console.error('[pgAgent] Error refreshing job node:', err);
         }
       },
-      
+
       /* Refresh a job node when status update is received */
       refreshJobNode: function(serverId, jobId) {
         const t = pgBrowser.tree;
@@ -606,29 +784,86 @@ define('pgadmin.node.pga_job', [
             t.setInode(jobNode);
             
             // If the job node is currently selected, re-select it after refreshing
-            const wasSelected = t.isSelected(jobNode);
-            if (wasSelected) {
-              t.deselect(jobNode);
-              setTimeout(function() {
-                t.select(jobNode);
-              }, 100);
+            if (t.selected() && t.selected().length > 0 && 
+                t.selected().indexOf(jobNode) !== -1) {
+              setTimeout(function() { 
+                t.select(jobNode); 
+              }, 500);
             }
           } else {
-            // If job not found, refresh the collection to show new/updated jobs
-            console.log('Job node not found, refreshing collection node');
-            // Only unload if it's loaded (has children)
-            if (t.isInode(collectionNode)) {
-              t.unload(collectionNode);
-              setTimeout(function() {
-                t.toggle(collectionNode);
-              }, 100);
-            }
+            console.log('Job node not found, refreshing entire collection');
+            t.refresh(collectionNode);
           }
-        } catch (error) {
-          console.error('Error refreshing job node:', error);
+        } catch (ex) {
+          console.error('Error refreshing job node:', ex);
         }
       },
-
+      
+      /* Refresh all pgAgent jobs for a server */
+      refreshJobs: function(serverId) {
+        const t = pgBrowser.tree;
+        console.log('📢[pgAdmin pgAgent] Refreshing all jobs for server ID:', serverId);
+        
+        try {
+          // Find the server node in the tree
+          let serverNode = t.findNodeByDomElement(
+            `div[data-pgadmin-node-type="server"][data-pgadmin-value="${serverId}"]`
+          );
+          
+          // If server node not found, try to find it by traversing the tree
+          if (!serverNode) {
+            console.log('📢[pgAdmin pgAgent] Server node not found by DOM element, trying alternative method');
+            const rootNode = t.rootNode;
+            t.findNodesByDomElement(rootNode, function(node) {
+              const data = t.itemData(node);
+              if (data && data._type === 'server' && data._id === serverId) {
+                serverNode = node;
+                return true;
+              }
+              return false;
+            });
+          }
+          
+          if (!serverNode) {
+            console.warn('📢[pgAdmin pgAgent] Server node not found for ID:', serverId);
+            return;
+          }
+          
+          // Find the pgAgent Jobs collection node under the server
+          let collectionNode = null;
+          t.findChildNodes(serverNode, function(node) {
+            const data = t.itemData(node);
+            if (data && data._type === 'coll-pga_job') {
+              collectionNode = node;
+              return true;
+            }
+            return false;
+          });
+          
+          if (!collectionNode) {
+            console.warn('📢[pgAdmin pgAgent] pgAgent Jobs collection node not found for server:', serverId);
+            return;
+          }
+          
+          // Refresh the pgAgent Jobs collection node
+          console.log('📢[pgAdmin pgAgent] Refreshing pgAgent Jobs collection');
+          setTimeout(function() {
+            try {
+              t.refresh(collectionNode).then(function() {
+                console.log('📢[pgAdmin pgAgent] Successfully refreshed pgAgent Jobs collection');
+              }).catch(function(err) {
+                console.error('📢[pgAdmin pgAgent] Error refreshing pgAgent Jobs collection:', err);
+              });
+            } catch (e) {
+              console.error('📢[pgAdmin pgAgent] Error triggering refresh:', e);
+            }
+          }, 100);
+          
+        } catch (e) {
+          console.error('📢[pgAdmin pgAgent] Error in refreshJobs:', e);
+        }
+      },
+      
       /* Set up diagnostic tools for socket debugging */
       setupDiagnosticTools: function() {
         var self = this;
@@ -642,6 +877,20 @@ define('pgadmin.node.pga_job', [
             checks: [],
             errors: []
           }
+        };
+        
+        // Help documentation
+        window.pgAgentSocketDiagnostics.help = function() {
+          console.log('===== pgAgent Socket Diagnostics Help =====');
+          console.log('Available commands:');
+          console.log('  pgAgentSocketDiagnostics.status() - Show current connection status');
+          console.log('  pgAgentSocketDiagnostics.testConnection() - Test socket connection');
+          console.log('  pgAgentSocketDiagnostics.testDirectConnection() - Test direct socket connection');
+          console.log('  pgAgentSocketDiagnostics.testNotification() - Test notification processing');
+          console.log('  pgAgentSocketDiagnostics.testSimpleNotification() - Test notification with simple endpoint');
+          console.log('  pgAgentSocketDiagnostics.reconnect() - Force socket reconnection');
+          console.log('  pgAgentSocketDiagnostics.help() - Show this help message');
+          return 'Help displayed in console.';
         };
         
         // Record environment info
@@ -663,39 +912,33 @@ define('pgadmin.node.pga_job', [
             // Get the full base URL and path components
             const origin = window.location.origin;
             const pgAdminPath = url_for('pgadmin.root').replace(/\/$/, '');
-            const socketIoPath = '/socket.io';
-            const pgAgentNamespace = '/pgagent';
             
+            // For Socket.IO, we connect to the root and use namespaces
             console.log('URL components:');
             console.log('- Origin:', origin);
-            console.log('- pgAdmin Path:', pgAdminPath);
-            console.log('- Socket.IO Path:', socketIoPath);
-            console.log('- pgAgent Namespace:', pgAgentNamespace);
+            console.log('- pgAdmin path:', pgAdminPath);
+            console.log('- Socket.IO path:', pgAdminPath + '/socket.io');
+            console.log('- Socket.IO namespace:', 'pgagent');
             
-            // Full URL construction
-            const fullSocketUrl = origin + pgAgentNamespace;
-            console.log('Full Socket URL:', fullSocketUrl);
-            
-            // Test WebSocket URL - this will show how the browser would interpret a WebSocket connection
-            const wsUrl = new URL(socketIoPath, origin);
+            // WebSocket URL construction for Socket.IO
+            const wsUrl = new URL(pgAdminPath + '/socket.io', origin);
             wsUrl.protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             console.log('WebSocket URL construction:', wsUrl.href);
             
-            // Check for protocol-relative URLs
-            if (pgAdminPath.startsWith('//')) {
-              console.warn('Warning: Protocol-relative URL detected which may cause WebSocket connection issues');
-            }
+            // Correct Socket.IO URL format
+            console.log('Correct Socket.IO connection format:');
+            console.log('- URL: origin (', origin, ')');
+            console.log('- Namespace: "pgagent" (not a URL path)');
+            console.log('- Path option: "' + pgAdminPath + '/socket.io"');
             
             // Record all URL construction results
             return {
               origin: origin,
               pgAdminPath: pgAdminPath,
-              socketIoPath: socketIoPath,
-              pgAgentNamespace: pgAgentNamespace,
-              fullSocketUrl: fullSocketUrl,
+              socketIoPath: pgAdminPath + '/socket.io',
+              socketIoNamespace: 'pgagent',
               websocketUrl: wsUrl.href,
-              href: window.location.href,
-              protocolRelativeDetected: pgAdminPath.startsWith('//')
+              href: window.location.href
             };
           } catch (err) {
             console.error('Error validating Socket.IO URLs:', err);
@@ -703,6 +946,228 @@ define('pgadmin.node.pga_job', [
               error: err.toString(),
               origin: window.location.origin,
               href: window.location.href
+            };
+          }
+        };
+        
+        // Add a function to check for Socket.IO availability
+        window.pgAgentSocketDiagnostics.checkSocketIO = function() {
+          console.log('====== Socket.IO Module Check ======');
+          
+          const socketIOAvailability = {
+            'socket_instance': {
+              available: typeof socket_instance !== 'undefined',
+              type: typeof socket_instance
+            },
+            'socket_instance.io': {
+              available: typeof socket_instance !== 'undefined' && 
+                        socket_instance && 
+                        typeof socket_instance.io !== 'undefined',
+              type: typeof socket_instance !== 'undefined' && 
+                    socket_instance ? 
+                    typeof socket_instance.io : 'N/A'
+            },
+            'socket_instance.io.connect': {
+              available: typeof socket_instance !== 'undefined' && 
+                        socket_instance && 
+                        socket_instance.io && 
+                        typeof socket_instance.io.connect === 'function',
+              type: typeof socket_instance !== 'undefined' && 
+                    socket_instance && 
+                    socket_instance.io ? 
+                    typeof socket_instance.io.connect : 'N/A'
+            },
+            'socket_io': {
+              available: typeof socket_io !== 'undefined',
+              type: typeof socket_io
+            },
+            'window.io': {
+              available: typeof window.io !== 'undefined',
+              type: typeof window.io
+            },
+            'global.io': {
+              available: typeof io !== 'undefined',
+              type: typeof io
+            }
+          };
+          
+          console.log('Socket.IO module availability:');
+          for (const key in socketIOAvailability) {
+            const item = socketIOAvailability[key];
+            console.log(`- ${key}: ${item.available ? '✓' : '✗'} (${item.type})`);
+          }
+          
+          // Display info about socket_instance if available
+          if (socketIOAvailability['socket_instance'].available) {
+            console.log('\nSocket Instance Details:');
+            if (socket_instance.io) {
+              console.log('- Has io property: ✓');
+              console.log('- io type:', typeof socket_instance.io);
+              console.log('- Has io.connect():', typeof socket_instance.io.connect === 'function' ? '✓' : '✗');
+            } else {
+              console.log('- Has io property: ✗');
+            }
+            
+            console.log('- Has openSocket():', typeof socket_instance.openSocket === 'function' ? '✓' : '✗');
+            console.log('- Has registry:', typeof socket_instance.registry !== 'undefined' ? '✓' : '✗');
+            
+            // Check for any registered sockets
+            if (socket_instance.registry && socket_instance.registry.connections) {
+              const connCount = Object.keys(socket_instance.registry.connections).length;
+              console.log('- Registered connections:', connCount);
+              if (connCount > 0) {
+                console.log('- Active connections:');
+                for (const ns in socket_instance.registry.connections) {
+                  const sock = socket_instance.registry.connections[ns];
+                  console.log(`  * ${ns}: connected=${sock.connected}, id=${sock.id || 'none'}`);
+                }
+              }
+            }
+          }
+          
+          return socketIOAvailability;
+        };
+        
+        // Add a test function to specifically check for transport errors
+        window.pgAgentSocketDiagnostics.checkTransportErrors = function() {
+          console.log('====== Socket.IO Transport Diagnostics ======');
+          
+          try {
+            // Get reference to pgAgent module
+            var pgaModule = pgBrowser.Nodes['pga_job'];
+            
+            if (!pgaModule) {
+              console.error('pgAgent module not found in pgBrowser.Nodes');
+              return {
+                available: false,
+                error: 'pgAgent module not found'
+              };
+            }
+            
+            // Check for existing socket connection
+            if (!pgaModule.socket) {
+              console.log('No existing socket connection. Will attempt a test connection.');
+              
+              // Create a test socket to check transport errors
+              const baseUrl = window.location.origin;
+              const pgAdminPath = url_for('pgadmin.root').replace(/\/$/, '');
+              const pgAgentNamespace = '/pgagent';
+              
+              console.log('Creating test connection with:');
+              console.log('- Origin:', baseUrl);
+              console.log('- pgAdmin Path:', pgAdminPath);
+              console.log('- Socket.IO Path:', pgAdminPath + '/socket.io');
+              console.log('- Namespace:', pgAgentNamespace);
+              
+              // Try to connect with both transports to test which one works
+              const testSocket = io(pgAgentNamespace, {
+                path: pgAdminPath + '/socket.io',
+                transports: ['websocket', 'polling'],
+                reconnectionAttempts: 1,
+                reconnectionDelay: 100,
+                timeout: 5000,
+                auth: {
+                  test: true
+                }
+              });
+              
+              console.log('Test connection initiated');
+              
+              // Set up event handlers to track connection status
+              const connectionStatus = {
+                connected: false,
+                transport: null,
+                errors: [],
+                disconnected: false,
+                disconnectReason: null
+              };
+              
+              testSocket.on('connect', function() {
+                connectionStatus.connected = true;
+                connectionStatus.transport = testSocket.io.engine.transport.name;
+                console.log('Test connection successful via ' + connectionStatus.transport);
+                
+                // Check for transport upgrade ability
+                testSocket.io.engine.once('upgrade', function() {
+                  console.log('Transport upgraded to: ' + testSocket.io.engine.transport.name);
+                  connectionStatus.transport = testSocket.io.engine.transport.name;
+                });
+                
+                // Disconnect after 3 seconds
+                setTimeout(function() {
+                  console.log('Closing test connection');
+                  testSocket.disconnect();
+                }, 3000);
+              });
+              
+              testSocket.on('connect_error', function(err) {
+                console.error('Test connection error:', err);
+                connectionStatus.errors.push({
+                  type: 'connect_error',
+                  message: err.toString(),
+                  timestamp: new Date().toISOString()
+                });
+              });
+              
+              testSocket.on('error', function(err) {
+                console.error('Test socket error:', err);
+                connectionStatus.errors.push({
+                  type: 'error',
+                  message: err.toString(),
+                  timestamp: new Date().toISOString()
+                });
+              });
+              
+              testSocket.on('disconnect', function(reason) {
+                console.log('Test connection disconnected:', reason);
+                connectionStatus.disconnected = true;
+                connectionStatus.disconnectReason = reason;
+              });
+              
+              // Let caller know this is async
+              console.log('Transport test initiated - check console for results in a few seconds');
+              
+              return {
+                testing: true,
+                message: 'Transport test in progress - check console for results'
+              };
+            } else {
+              // Existing socket is available, report on its status
+              const socket = pgaModule.socket;
+              
+              const transportInfo = {
+                connected: socket.connected,
+                id: socket.id,
+                namespace: socket.nsp ? socket.nsp.name : 'unknown',
+                transport: socket.io && socket.io.engine ? socket.io.engine.transport.name : 'unknown',
+                transportProtocol: socket.io && socket.io.engine ? socket.io.engine.protocol : 'unknown',
+                supportedTransports: socket.io ? socket.io._readyState : 'unknown'
+              };
+              
+              console.log('Current socket transport information:');
+              for (const key in transportInfo) {
+                console.log(`- ${key}: ${transportInfo[key]}`);
+              }
+              
+              // Check if we have any recorded errors
+              if (window.pgAgentSocketDiagnostics && 
+                  window.pgAgentSocketDiagnostics.status && 
+                  window.pgAgentSocketDiagnostics.status.errors && 
+                  window.pgAgentSocketDiagnostics.status.errors.length > 0) {
+                console.log('\nRecorded transport errors:');
+                window.pgAgentSocketDiagnostics.status.errors.forEach(function(err, idx) {
+                  console.log(`${idx + 1}. [${err.timestamp}] ${err.type}: ${err.message || err.reason || JSON.stringify(err)}`);
+                });
+              } else {
+                console.log('No recorded transport errors');
+              }
+              
+              return transportInfo;
+            }
+          } catch (err) {
+            console.error('Error in transport diagnostics:', err);
+            return {
+              error: err.toString()
             };
           }
         };
@@ -787,63 +1252,89 @@ define('pgadmin.node.pga_job', [
           var testSocket = null;
           
           try {
-            // Get the full base URL for the socket connection
+            // Construct the socket URLs properly - avoid double slashes in URL
             const baseUrl = window.location.origin;
-            const testUrl = baseUrl + '/pgagent';
+            const pgAdminPath = url_for('pgadmin.root').replace(/\/$/, '');
+            // Just use the namespace name with leading slash for Socket.IO
+            const pgAgentNamespace = '/pgagent';
             
-            console.log('Attempting test connection to:', testUrl);
-            console.log('Using socket.io path:', '/socket.io');
+            console.log('Socket connection test configuration:');
+            console.log('- Base URL:', baseUrl);
+            console.log('- pgAdmin path:', pgAdminPath);
+            console.log('- Socket.IO path:', pgAdminPath + '/socket.io');
+            console.log('- pgAgent namespace:', pgAgentNamespace);
+            
+            console.log('Attempting test connection with namespace:', pgAgentNamespace);
             
             // Record connection attempt
             window.pgAgentSocketDiagnostics.status.checks.push({
               type: 'connection_test',
-              url: testUrl,
-              socketIoPath: '/socket.io',
+              url: baseUrl,
+              namespace: pgAgentNamespace,
               started: true,
               timestamp: new Date().toISOString()
             });
             
+            // Enhanced connection options to prevent quick disconnection
+            const socketOptions = {
+              path: pgAdminPath + '/socket.io',
+              reconnection: false,
+              timeout: 5000
+            };
+            
             // Try using socket_instance first
             if (socket_instance && socket_instance.io) {
               console.log('Using socket_instance.io for test');
-              testSocket = socket_instance.io.connect(testUrl, {
-                path: '/socket.io',
-                transports: ['websocket', 'polling'],
-                reconnection: false,
-                timeout: 5000
-              });
+              testSocket = socket_instance.io(pgAgentNamespace, socketOptions);
             } else if (socket_io) {
               console.log('Using imported socket_io for test');
-              testSocket = socket_io(testUrl, {
-                path: '/socket.io',
-                transports: ['websocket', 'polling'],
-                reconnection: false,
-                timeout: 5000
-              });
+              testSocket = socket_io(pgAgentNamespace, socketOptions);
             } else if (typeof io !== 'undefined') {
               console.log('Using global io for test');
-              testSocket = io(testUrl, {
-                path: '/socket.io',
-                transports: ['websocket', 'polling'],
-                reconnection: false,
-                timeout: 5000
-              });
+              testSocket = io(pgAgentNamespace, socketOptions);
             } else {
               throw new Error('No Socket.IO client available for test');
+            }
+            
+            // Check namespace immediately after creation
+            console.log('Socket created, checking namespace before connection:');
+            console.log('- Socket has nsp:', testSocket.nsp ? '✓' : '✗');
+            if (testSocket.nsp) {
+              console.log('- Socket namespace:', testSocket.nsp.name);
+              console.log('- Namespace correct:', testSocket.nsp.name === pgAgentNamespace ? '✓' : '✗');
             }
             
             // Set up event handlers for the test socket
             testSocket.on('connect', function() {
               console.log('Test connection succeeded with ID:', testSocket.id);
               
-              // Send echo test
+              // Verify namespace after connection
+              if (testSocket.nsp) {
+                console.log('Socket namespace after connect:', testSocket.nsp.name);
+                console.log('Namespace matches expected:', 
+                  testSocket.nsp.name === pgAgentNamespace ? '✓' : '✗');
+              } else {
+                console.warn('Socket nsp property not available after connection');
+              }
+              
+              // Check Socket.IO version
+              const isSocketIOv4 = testSocket.io && testSocket.io.engine 
+                && typeof testSocket.io.engine.transport !== 'undefined';
+              
+              console.log('Socket.IO test connection using transport:', 
+                isSocketIOv4 ? testSocket.io.engine.transport.name : 'unknown');
+              
+              // Send echo test with different event formats
               console.log('Sending echo test');
-              testSocket.emit('echo_test', { message: 'Test from pgAgent diagnostics', timestamp: new Date().toISOString() });
+              testSocket.emit('echo_test', { 
+                message: 'Test from pgAgent diagnostics', 
+                timestamp: new Date().toISOString() 
+              });
               
               // Record successful connection
               window.pgAgentSocketDiagnostics.status.checks.push({
                 type: 'connection_test',
-                url: testUrl,
+                namespace: pgAgentNamespace,
                 success: true,
                 socketId: testSocket.id,
                 timestamp: new Date().toISOString()
@@ -856,21 +1347,6 @@ define('pgadmin.node.pga_job', [
               }, 3000);
             });
             
-            testSocket.on('connect_error', function(err) {
-              console.error('Test connection error:', err);
-              
-              // Record connection error
-              window.pgAgentSocketDiagnostics.status.errors.push({
-                type: 'connection_error',
-                url: testUrl,
-                error: err.toString(),
-                timestamp: new Date().toISOString()
-              });
-              
-              // Disconnect test socket
-              testSocket.disconnect();
-            });
-            
             testSocket.on('echo_response', function(response) {
               console.log('Received echo response from server:', response);
               
@@ -880,6 +1356,37 @@ define('pgadmin.node.pga_job', [
                 response: response,
                 timestamp: new Date().toISOString()
               });
+            });
+            
+            testSocket.on('connect_error', function(err) {
+              console.error('Test connection error:', err);
+              
+              // Try to log as much info as possible about the error
+              var errorDetails = {
+                message: err.message || 'Unknown error',
+                type: err.type || typeof err,
+                data: err.data || null
+              };
+              console.error('Connection error details:', errorDetails);
+              
+              // Check if the error might be related to namespace issues
+              if (err.message && 
+                  (err.message.includes('namespace') || 
+                   err.message.includes('Invalid namespace'))) {
+                console.error('Namespace error detected. Make sure namespace starts with a /');
+              }
+              
+              // Record connection error
+              window.pgAgentSocketDiagnostics.status.errors.push({
+                type: 'connection_error',
+                namespace: pgAgentNamespace,
+                error: err.toString(),
+                error_details: errorDetails,
+                timestamp: new Date().toISOString()
+              });
+              
+              // Disconnect test socket
+              testSocket.disconnect();
             });
             
             testSocket.on('error', function(err) {
@@ -908,114 +1415,601 @@ define('pgadmin.node.pga_job', [
           }
         };
         
-        // Fix connection function
-        window.pgAgentSocketDiagnostics.fixConnection = function() {
-          console.log('====== pgAgent Socket Fix Attempt ======');
-          var fixes = [];
-          
-          // Check and fix socket_instance.io
-          if (socket_instance && !socket_instance.io && typeof io !== 'undefined') {
-            console.log('Fixing missing socket_instance.io with global io');
-            socket_instance.io = io;
-            fixes.push('Patched socket_instance.io with global io');
-          }
-          
-          // Check if we need to reconnect the main socket
-          if (!self.socket || !self.socket.connected) {
-            console.log('Attempting to reconnect main socket');
-            self.disconnectJobStatusSocket(); // Clean up any existing socket
-            self.connectJobStatusSocket();
-            fixes.push('Attempted to reconnect main socket');
-          }
-          
-          // Record fixes
-          window.pgAgentSocketDiagnostics.fixes = fixes;
-          console.log('Fix attempts completed:', fixes);
-          
-          return fixes;
-        };
-        
-        // Help documentation
-        window.pgAgentSocketDiagnostics.help = function() {
-          console.log('====== pgAgent Socket Diagnostics Help ======');
-          console.log('Available commands:');
-          console.log('  pgAgentSocketDiagnostics.checkEnvironment() - Check required globals and environment');
-          console.log('  pgAgentSocketDiagnostics.testDirectConnection() - Test direct socket connection');
-          console.log('  pgAgentSocketDiagnostics.validateSocketURL() - Validate Socket.IO URLs');
-          console.log('  pgAgentSocketDiagnostics.fixConnection() - Attempt to fix common connection issues');
-          console.log('  pgAgentSocketDiagnostics.help() - Show this help message');
-          console.log('  pgAgentSocketDiagnostics.status - View recorded checks and errors');
-          
-          return 'Use the commands above to diagnose socket connection issues';
-        };
-        
         // Run initial environment check
         window.pgAgentSocketDiagnostics.checkEnvironment();
         console.log('[pgAgent] Validating Socket.IO URLs:');
         window.pgAgentSocketDiagnostics.validateSocketURL();
         console.log('[pgAgent] Diagnostic tools setup complete. Type pgAgentSocketDiagnostics.help() in the console for available commands.');
         
-        return window.pgAgentSocketDiagnostics;
-      },
+        // Add the fix connection function
+        window.pgAgentSocketDiagnostics.fixConnection = function() {
+          console.log('====== pgAgent Socket Connection Fix ======');
+          
+          try {
+            // Get reference to pgAgent module
+            var pgaModule = pgBrowser.Nodes['pga_job'];
+            
+            if (!pgaModule) {
+              console.error('pgAgent module not found in pgBrowser.Nodes');
+              return {
+                success: false,
+                error: 'pgAgent module not found'
+              };
+            }
+            
+            console.log('Checking current connection status...');
+            
+            // First, store the current server ID if we have one
+            var currentServerId = pgaModule.currentServerId;
+            console.log('Current server ID:', currentServerId || 'None');
+            
+            // Check if socket exists and its status
+            var socketExists = pgaModule.socket ? true : false;
+            var socketConnected = socketExists && pgaModule.socket.connected;
+            var correctNamespace = false;
 
-      refreshJobNodeIfNeeded: function(data) {
-        var self = this;
-        
-        if (!data || !data.job_id) {
-          console.warn('[pgAgent] Received job status update without job_id');
-          return;
-        }
-        
-        console.log('[pgAgent] Processing job status update:', data);
-        
-        // Make sure browser and tree are available
-        if (!pgBrowser || !pgBrowser.tree) {
-          console.warn('[pgAgent] Cannot refresh job node: browser or tree not available');
-          return;
-        }
-        
-        // Find the job node in the tree
-        try {
-          // We need to find all job nodes that match the job_id
-          var treeRoot = pgBrowser.tree.rootNode();
-          var matchingNodes = [];
-          
-          // Function to recursively search for job nodes
-          function findJobNodes(node) {
-            if (!node) return;
-            
-            // Check if this is a job node with matching ID
-            if (node._type === 'pga_job' && 
-                node._id && 
-                node._id.toString() === data.job_id.toString()) {
-              matchingNodes.push(node);
+            if (socketExists && pgaModule.socket.nsp) {
+              // More detailed logging about the namespace
+              console.log('Socket namespace details:', {
+                nspName: pgaModule.socket.nsp.name,
+                nspType: typeof pgaModule.socket.nsp.name,
+                expectedNamespace: pgAgentNamespace,
+                namespacesMatch: pgaModule.socket.nsp.name === pgAgentNamespace
+              });
+              
+              // Check for exact match or if the namespace is there but formatted differently
+              correctNamespace = pgaModule.socket.nsp.name === pgAgentNamespace ||
+                                 pgaModule.socket.nsp.name === '/pgagent';
+            } else if (socketExists) {
+              console.log('Socket exists but nsp property is missing:', pgaModule.socket);
             }
             
-            // Check children
-            if (node.children) {
-              node.children.forEach(findJobNodes);
+            console.log('Socket status:');
+            console.log('- Exists:', socketExists ? '✓' : '✗');
+            console.log('- Connected:', socketConnected ? '✓' : '✗');
+            console.log('- In correct namespace:', correctNamespace ? '✓' : '✗');
+            
+            // Always disconnect existing socket first to ensure clean state
+            if (socketExists) {
+              console.log('Disconnecting existing socket...');
+              pgaModule.disconnectJobStatusSocket();
+              
+              // Wait a moment to ensure disconnection is complete
+              setTimeout(function() {
+                console.log('Reconnecting socket to pgagent namespace...');
+                
+                // Reconnect with the server ID we had before
+                if (currentServerId) {
+                  console.log('Connecting with server ID:', currentServerId);
+                  pgaModule.connectJobStatusSocket(currentServerId);
+                } else {
+                  console.warn('No server ID available for reconnection');
+                  console.log('Will connect without server ID - listener will not function until a server ID is set');
+                  pgaModule.connectJobStatusSocket();
+                }
+                
+                // Schedule a check of the new connection
+                setTimeout(function() {
+                  console.log('Checking new connection status...');
+                  
+                  var newSocketExists = pgaModule.socket ? true : false;
+                  var newSocketConnected = newSocketExists && pgaModule.socket.connected;
+                  var newCorrectNamespace = newSocketExists && 
+                                          pgaModule.socket.nsp && 
+                                          pgaModule.socket.nsp.name && 
+                                          pgaModule.socket.nsp.name.includes('pgagent');
+                  
+                  console.log('New socket status:');
+                  console.log('- Exists:', newSocketExists ? '✓' : '✗');
+                  console.log('- Connected:', newSocketConnected ? '✓' : '✗');
+                  console.log('- In correct namespace:', newCorrectNamespace ? '✓' : '✗');
+                  
+                  if (newSocketConnected && newCorrectNamespace) {
+                    console.log('Connection fix successful!');
+                    
+                    // Make sure listener is started if we have a server ID
+                    if (currentServerId) {
+                      console.log('Ensuring job status listener is started...');
+                      pgaModule.socket.emit('start_job_status_listener', { 
+                        sid: currentServerId,
+                        client_info: {
+                          client_id: pgaModule.socket.id,
+                          timestamp: new Date().toISOString(),
+                          reconnect: true
+                        }
+                      });
+                    }
+                  } else {
+                    console.error('Connection fix was not successful');
+                    
+                    if (!newSocketExists) {
+                      console.error('Socket was not created');
+                    } else if (!newSocketConnected) {
+                      console.error('Socket failed to connect');
+                    } else if (!newCorrectNamespace) {
+                      console.error('Socket connected to wrong namespace');
+                    }
+                    
+                    console.log('Check browser console for Socket.IO errors');
+                    console.log('Try refreshing the page to restart the socket connection');
+                  }
+                }, 2000); // Wait 2 seconds for connection to complete
+              }, 1000); // Wait 1 second after disconnection
+            } else {
+              console.log('No existing socket, creating new connection...');
+              
+              // Connect with server ID if available
+              if (currentServerId) {
+                pgaModule.connectJobStatusSocket(currentServerId);
+              } else {
+                pgaModule.connectJobStatusSocket();
+              }
+              
+              console.log('Connection initiated, check browser console for results');
             }
+            
+            return {
+              success: true,
+              message: 'Connection fix initiated',
+              originalStatus: {
+                hadServerId: !!currentServerId,
+                socketExisted: socketExists,
+                wasConnected: socketConnected,
+                wasInCorrectNamespace: correctNamespace
+              }
+            };
+          } catch (err) {
+            console.error('Error fixing connection:', err);
+            return {
+              success: false,
+              error: err.toString()
+            };
+          }
+        };
+        
+        // Run initial environment and diagnostic checks
+        window.pgAgentSocketDiagnostics.checkEnvironment();
+        window.pgAgentSocketDiagnostics.validateSocketURL();
+        window.pgAgentSocketDiagnostics.checkSocketIO();
+        console.log('[pgAgent] Diagnostic tools setup complete. Type pgAgentSocketDiagnostics.help() in the console for available commands.');
+        
+        // Check server connection status
+        window.pgAgentSocketDiagnostics.checkServerConnection = function() {
+          console.log('====== pgAgent Socket Server Connection Check ======');
+          
+          try {
+            // Make an AJAX request to the server connection status endpoint
+            const xhr = new XMLHttpRequest();
+            // Fix the URL construction to ensure proper path joining
+            const baseUrl = window.location.origin;
+            const pgAdminPath = url_for('pgadmin.root').replace(/\/$/, '');
+            const socketStatusUrl = baseUrl + pgAdminPath + '/socket-status';
+            
+            console.log('Socket status URL:', socketStatusUrl);
+            
+            xhr.open('GET', socketStatusUrl, true);
+            xhr.setRequestHeader('Content-Type', 'application/json');
+            xhr.setRequestHeader('X-pgA-CSRFToken', (window.pgAdmin && window.pgAdmin.csrf_token) || '');
+            xhr.withCredentials = true; // Include cookies for session authentication
+            
+            xhr.onreadystatechange = function() {
+              if (xhr.readyState === 4) {
+                if (xhr.status === 200) {
+                  const response = JSON.parse(xhr.responseText);
+                  console.log('Server connection status:', response);
+                  console.log('Active connections:', response.active_connections);
+                  if (response.clients && response.clients.length > 0) {
+                    console.log('Connected clients:');
+                    response.clients.forEach(function(client, index) {
+                      console.log(`Client ${index+1}:`, client);
+                    });
+                  } else {
+                    console.log('No clients connected');
+                  }
+                  return response;
+                } else if (xhr.status === 403) {
+                  console.log('Access denied. This endpoint is only available in debug mode or for admin users.');
+                  return false;
+                } else if (xhr.status === 401) {
+                  console.log('Authentication required. Make sure you are logged in as an admin user.');
+                  return false;
+                } else {
+                  console.error('Error checking server connection:', xhr.status);
+                  console.log('Response:', xhr.responseText);
+                  return false;
+                }
+              }
+            };
+            xhr.send();
+            console.log('Server connection check request sent. Awaiting response...');
+            return true;
+          } catch (err) {
+            console.error('Error in server connection check:', err);
+            return false;
+          }
+        };
+        
+        // Request server to send a test event
+        window.pgAgentSocketDiagnostics.requestServerTest = function() {
+          console.log('====== Requesting Server-Initiated Socket Test ======');
+          
+          try {
+            // Make an AJAX request to trigger a server-initiated socket event
+            const xhr = new XMLHttpRequest();
+            // Fix the URL construction to ensure proper path joining
+            const baseUrl = window.location.origin;
+            const pgAdminPath = url_for('pgadmin.root').replace(/\/$/, '');
+            const socketTestUrl = baseUrl + pgAdminPath + '/socket-test';
+            
+            console.log('Socket test URL:', socketTestUrl);
+            
+            xhr.open('GET', socketTestUrl, true);
+            xhr.setRequestHeader('Content-Type', 'application/json');
+            xhr.setRequestHeader('X-pgA-CSRFToken', (window.pgAdmin && window.pgAdmin.csrf_token) || '');
+            xhr.withCredentials = true; // Include cookies for session authentication
+            
+            xhr.onreadystatechange = function() {
+              if (xhr.readyState === 4) {
+                if (xhr.status === 200) {
+                  const response = JSON.parse(xhr.responseText);
+                  console.log('Server test request response:', response);
+                  return response;
+                } else if (xhr.status === 403) {
+                  console.log('Access denied. This endpoint is only available in debug mode or for admin users.');
+                  return false;
+                } else if (xhr.status === 401) {
+                  console.log('Authentication required. Make sure you are logged in as an admin user.');
+                  return false;
+                } else {
+                  console.error('Error requesting server test:', xhr.status);
+                  console.log('Response:', xhr.responseText);
+                  return false;
+                }
+              }
+            };
+            xhr.send();
+            console.log('Server test request sent. Awaiting response...');
+            return true;
+          } catch (err) {
+            console.error('Error in server test request:', err);
+            return false;
+          }
+        };
+        
+        // Add function to check Socket.IO globals
+        setTimeout(function() {
+          if (window.pgAgentSocketDiagnostics) {
+            window.pgAgentSocketDiagnostics.checkSocketGlobals = function() {
+              const globals = {
+                io: typeof io !== 'undefined',
+                window_io: typeof window.io !== 'undefined',
+                socket_io: typeof socket_io !== 'undefined',
+                socket_instance: typeof socket_instance !== 'undefined',
+                socket_instance_io: typeof socket_instance !== 'undefined' && typeof socket_instance.io !== 'undefined'
+              };
+              
+              console.log('------- Socket.IO Global Availability -------');
+              console.log('io (global): ' + globals.io);
+              console.log('window.io: ' + globals.window_io);
+              console.log('socket_io: ' + globals.socket_io);
+              console.log('socket_instance: ' + globals.socket_instance);
+              console.log('socket_instance.io: ' + globals.socket_instance_io);
+              console.log('-------------------------------------------');
+              
+              // Analyze and recommend
+              if (!globals.io && !globals.window_io && !globals.socket_io) {
+                console.error('ERROR: No Socket.IO library available. Socket.IO may not be loaded properly.');
+                console.log('Check network tab for socket.io.js or socket.io.min.js loading errors.');
+                console.log('Look for script tags or import statements loading Socket.IO in the HTML source.');
+              } else {
+                console.log('At least one Socket.IO client is available.');
+                
+                // Determine which client to use for connection
+                if (globals.io) {
+                  console.log('Recommended connection method: io(namespace, options)');
+                } else if (globals.window_io) {
+                  console.log('Recommended connection method: window.io(namespace, options)');
+                } else if (globals.socket_io) {
+                  console.log('Recommended connection method: socket_io(namespace, options)');
+                }
+              }
+              
+              return globals;
+            };
+          }
+        }, 0);
+
+        // Check job status listener function
+        window.pgAgentSocketDiagnostics.checkJobStatusListener = function() {
+          console.log('====== Checking pgAgent Job Status Listener ======');
+          
+          var pgaModule = pgBrowser.Nodes['pga_job'];
+          if (!pgaModule) {
+            console.error('pgAgent module not found in pgBrowser.Nodes');
+            return {
+              success: false,
+              error: 'pgAgent module not found'
+            };
           }
           
-          // Start search from root
-          findJobNodes(treeRoot);
-          
-          if (matchingNodes.length === 0) {
-            console.log('[pgAgent] No matching job nodes found for job_id:', data.job_id);
-            return;
+          // Check if a socket connection is established
+          var socket = pgaModule.socket;
+          if (!socket) {
+            console.error('No socket connection established for pgAgent');
+            return {
+              success: false,
+              error: 'No socket connection established'
+            };
           }
           
-          // Refresh each matching node
-          matchingNodes.forEach(function(node) {
-            console.log('[pgAgent] Refreshing job node:', node._id);
-            pgBrowser.tree.refresh(node);
+          console.log('Socket connection status:', socket.connected ? 'Connected' : 'Disconnected');
+          
+          // Check if the socket is connected to the correct namespace
+          // Using optional chaining and fallbacks to prevent errors
+          var currentNamespace = socket.nsp?.name || socket._pgAgentNamespace || socket.io?.opts?.path;
+          var expectedNamespace = '/pgagent';
+          
+          console.log('Socket namespace check:', {
+            hasNamespace: currentNamespace !== undefined,
+            namespaceValue: currentNamespace,
+            expectedNamespace: expectedNamespace,
+            customNamespaceTracking: !!socket._pgAgentNamespace,
+            socketObject: Object.keys(socket)
           });
           
-          console.log('[pgAgent] Refreshed', matchingNodes.length, 'job nodes for job_id:', data.job_id);
-        } catch (err) {
-          console.error('[pgAgent] Error refreshing job node:', err);
-        }
+          // Check if namespace is correct
+          if (currentNamespace && currentNamespace.includes(expectedNamespace)) {
+            console.log('✓ Socket is connected to the correct namespace:', currentNamespace);
+          } else {
+            console.warn('⚠️ Socket namespace mismatch or undefined!');
+            console.warn('  - Current:', currentNamespace);
+            console.warn('  - Expected:', expectedNamespace);
+            console.log('Socket object:', socket);
+          }
+          
+          return {
+            success: true,
+            connected: socket.connected,
+            namespace: {
+              current: currentNamespace,
+              expected: expectedNamespace,
+              isCorrect: currentNamespace && currentNamespace.includes(expectedNamespace)
+            }
+          };
+        };
+
+        // Add a diagnostic function to test notification processing
+        window.pgAgentSocketDiagnostics.testNotification = function() {
+          console.log('====== Testing pgAgent Notification Processing ======');
+          
+          try {
+            // Get reference to pgAgent module
+            var pgaModule = pgBrowser.Nodes['pga_job'];
+            
+            if (!pgaModule) {
+              console.error('pgAgent module not found in pgBrowser.Nodes');
+              return {
+                success: false,
+                error: 'pgAgent module not found'
+              };
+            }
+            
+            // Check if a socket connection exists
+            if (!pgaModule.socket || !pgaModule.socket.connected) {
+              console.error('Socket not connected, cannot test notification');
+              return {
+                success: false,
+                error: 'Socket not connected'
+              };
+            }
+            
+            // Get server ID
+            var serverId = pgaModule.currentServerId;
+            if (!serverId) {
+              console.error('No server ID available, cannot test notification');
+              return {
+                success: false,
+                error: 'No server ID available'
+              };
+            }
+            
+            console.log('Sending test notification request for server ID:', serverId);
+            
+            // Make an AJAX request to trigger a test notification from the server
+            const xhr = new XMLHttpRequest();
+            const pgAdminPath = url_for('pgadmin.root').replace(/\/$/, '');
+            const testUrl = window.location.origin + pgAdminPath + 
+                           '/browser/server_groups/servers/pgagent/debug/test_notification/' + serverId;
+            
+            xhr.open('GET', testUrl, true);
+            xhr.setRequestHeader('Content-Type', 'application/json');
+            xhr.withCredentials = true;
+            
+            xhr.onreadystatechange = function() {
+              if (xhr.readyState === 4) {
+                if (xhr.status === 200) {
+                  try {
+                    const response = JSON.parse(xhr.responseText);
+                    console.log('Test notification request response:', response);
+                    console.log('Check console logs for notification events in the next few seconds...');
+                  } catch (e) {
+                    console.error('Error parsing response:', e);
+                  }
+                } else {
+                  console.error('Error sending test notification request:', xhr.status, xhr.statusText);
+                  console.log('Response:', xhr.responseText);
+                }
+              }
+            };
+            
+            xhr.send();
+            
+            return {
+              success: true,
+              message: 'Test notification request sent, check console for events'
+            };
+          } catch (err) {
+            console.error('Error testing notification:', err);
+            return {
+              success: false,
+              error: err.toString()
+            };
+          }
+        };
+
+        // Add a simple test notification that works without debug mode
+        window.pgAgentSocketDiagnostics.testSimpleNotification = function() {
+          console.log('====== Testing pgAgent Simple Notification ======');
+          
+          try {
+            // Get reference to pgAgent module
+            var pgaModule = pgBrowser.Nodes['pga_job'];
+            
+            if (!pgaModule) {
+              console.error('pgAgent module not found in pgBrowser.Nodes');
+              return {
+                success: false,
+                error: 'pgAgent module not found'
+              };
+            }
+            
+            // Check if a socket connection exists
+            if (!pgaModule.socket || !pgaModule.socket.connected) {
+              console.error('Socket not connected, cannot test notification');
+              return {
+                success: false,
+                error: 'Socket not connected'
+              };
+            }
+            
+            // Get server ID
+            var serverId = pgaModule.currentServerId;
+            if (!serverId) {
+              console.error('No server ID available, cannot test notification');
+              return {
+                success: false,
+                error: 'No server ID available'
+              };
+            }
+            
+            console.log('Sending simple test notification for server ID:', serverId);
+            
+            // Make an AJAX request to trigger a test notification from the server
+            const xhr = new XMLHttpRequest();
+            const pgAdminPath = url_for('pgadmin.root').replace(/\/$/, '');
+            const testUrl = window.location.origin + pgAdminPath + 
+                           '/browser/server_groups/servers/pgagent/test_notification_simple/' + serverId;
+            
+            console.log('Using test URL:', testUrl);
+            
+            // Log detailed Socket.IO state before sending test
+            console.log('Current Socket.IO state:');
+            console.log('- Connected:', pgaModule.socket.connected);
+            console.log('- Socket ID:', pgaModule.socket.id);
+            console.log('- Namespace:', pgaModule.socket.nsp?.name || pgaModule.socket._pgAgentNamespace || '(unknown)');
+            
+            // Set up a socket.io event listener for the notification
+            pgaModule.socket.once('job_status_update', function(data) {
+              console.log('✅ Received job_status_update event:', data);
+              alert('Job status notification received! Check console for details.');
+            });
+            
+            xhr.open('GET', testUrl, true);
+            xhr.setRequestHeader('Content-Type', 'application/json');
+            xhr.withCredentials = true;
+            
+            xhr.onreadystatechange = function() {
+              if (xhr.readyState === 4) {
+                if (xhr.status === 200) {
+                  try {
+                    const response = JSON.parse(xhr.responseText);
+                    console.log('Simple test notification response:', response);
+                    console.log('✓ Simple test notification sent successfully.');
+                    console.log('Check console logs for notification events in the next few seconds...');
+                    
+                    // Give more guidance to users
+                    console.log('If no notification appears, check:');
+                    console.log('1. Server logs for NOTIFY commands');
+                    console.log('2. Connection status of the Socket.IO connection');
+                    console.log('3. That you are listening on the correct channel (job_status_update)');
+                  } catch (e) {
+                    console.error('Error parsing response:', e);
+                  }
+                } else {
+                  console.error('Error sending simple test notification:', xhr.status, xhr.statusText);
+                  console.log('Response:', xhr.responseText);
+                  
+                  // Provide troubleshooting guidance
+                  console.log('Common troubleshooting steps:');
+                  console.log('1. Check that you are connected to the server');
+                  console.log('2. Verify the server has pgAgent extension installed');
+                  console.log('3. Check server logs for any errors');
+                  console.log('4. Try reconnecting the Socket.IO connection');
+                }
+              }
+            };
+            
+            xhr.send();
+            
+            return {
+              success: true,
+              message: 'Simple test notification request sent, check console for events'
+            };
+          } catch (err) {
+            console.error('Error testing simple notification:', err);
+            return {
+              success: false,
+              error: err.toString()
+            };
+          }
+        };
       },
+
+      /* Disconnect the socket if one exists */
+      disconnectJobStatusSocket: function() {
+        var self = this;
+        
+        try {
+          console.log('[pgAgent] Disconnecting job status socket...');
+          
+          if (self.socket) {
+            // Only send stop event if the socket is connected
+            if (self.socket.connected && self.currentServerId) {
+              console.log('[pgAgent] Sending stop_job_status_listener for server ID:', self.currentServerId);
+              self.socket.emit('stop_job_status_listener', {
+                sid: self.currentServerId
+              });
+            }
+            
+            // Unregister all event handlers to prevent memory leaks
+            self.socket.off('connect');
+            self.socket.off('disconnect');
+            self.socket.off('connect_error');
+            self.socket.off('error');
+            self.socket.off('job_status_listener_started');
+            self.socket.off('job_status_listener_error');
+            self.socket.off('job_status_update');
+            self.socket.off('reconnect');
+            
+            // Disconnect the socket
+            self.socket.disconnect();
+            console.log('[pgAgent] Socket disconnected');
+          }
+          
+          // Clean up references
+          self.socket = null;
+          self._jobStatusListenerActive = false;
+          
+          // Also stop the keep-alive ping
+          self.stopKeepAlivePing();
+          
+          console.log('[pgAgent] Socket cleanup complete');
+          return true;
+        } catch (error) {
+          console.error('[pgAgent] Error disconnecting socket:', error);
+          return false;
+        }
+      }
     });
   }
 
