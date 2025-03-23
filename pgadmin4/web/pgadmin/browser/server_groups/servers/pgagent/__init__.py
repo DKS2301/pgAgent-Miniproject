@@ -10,15 +10,18 @@
 """Implements the pgAgent Jobs Node"""
 from functools import wraps
 import json
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 import select
 import traceback
+import random
+import functools
 
 from flask import render_template, request, jsonify, current_app
+import flask
 from flask_babel import gettext as _
 from flask_login import current_user, login_user
 
-from config import PG_DEFAULT_DRIVER
+from config import PG_DEFAULT_DRIVER  
 
 from pgadmin.browser.collection import CollectionNodeModule
 from pgadmin.browser.utils import PGChildNodeView
@@ -139,7 +142,11 @@ SELECT EXISTS(
         super().register(app, options)
 
 
+##########################################################################
+#
 # SocketIO event handlers for pgAgent job status updates
+#
+##########################################################################
 @socketio.on('connect', namespace=SOCKETIO_NAMESPACE)
 def pgagent_connect(auth=None):
     """
@@ -199,7 +206,6 @@ def start_job_status_listener(data):
     # Get the server ID from the data
     sid = data.get('sid', None)
     client_info = data.get('client_info', {})
-    
     current_app.logger.info(
         f"Starting job status listener for server ID {sid} from client {client_info.get('client_id', 'unknown')}"
     )
@@ -261,7 +267,7 @@ def start_job_status_listener(data):
                 return
                 
             # Double-check that we're actually listening
-            status, channels = conn.execute_dict("SELECT channel FROM pg_listening_channels()")
+            status, channels = conn.execute_dict("SELECT pg_listening_channels() AS channel")
             if status and 'rows' in channels:
                 has_pgagent_channel = any(row['channel'] == 'job_status_update' for row in channels['rows'])
                 current_app.logger.info(f"LISTEN command executed. Listening on job_status_update: {has_pgagent_channel}")
@@ -291,13 +297,16 @@ def start_job_status_listener(data):
             if sid not in active_listeners:
                 active_listeners[sid] = {}
             
-            # Store the connection for this client
-            active_listeners[sid][request.sid] = conn
+            # Store the connection and user for this client
+            active_listeners[sid][request.sid] = {
+                'conn': conn, 
+                'user': current_user._get_current_object()
+            }
             
             # Start background task to check for notifications
             # The connection is already established and stored in active_listeners
             # so we don't need to create a new one in the background thread
-            socketio.start_background_task(check_job_status_notifications, current_app._get_current_object(), sid, request.sid, current_user._get_current_object())
+            socketio.start_background_task(check_job_status_notifications, current_app._get_current_object(), sid, request.sid)
             
             # Send success response to client
             socketio.emit('job_status_listener_started', {
@@ -358,7 +367,7 @@ def stop_job_status_listener(data):
             return
             
         if request.sid in active_listeners[sid]:
-            conn = active_listeners[sid][request.sid]
+            conn = active_listeners[sid][request.sid]['conn']
             try:
                 current_app.logger.debug('📢[SocketIO pgAgent] Issuing UNLISTEN command for server: %s', sid)
                 status, result = conn.execute_void("UNLISTEN job_status_update")
@@ -418,7 +427,7 @@ def handle_client_disconnect(event=None):
     # Find all servers this client was listening to
     for sid in list(active_listeners.keys()):
         if client_sid in active_listeners[sid]:
-            client_servers.append((sid, active_listeners[sid][client_sid]))
+            client_servers.append((sid, active_listeners[sid][client_sid]['conn']))
     
     if not client_servers:
         current_app.logger.info('📢[SocketIO pgAgent] No active listeners found for client %s', client_sid)
@@ -430,7 +439,7 @@ def handle_client_disconnect(event=None):
     # Clean up each connection
     for sid, conn in client_servers:
         try:
-            if conn and conn.connected():
+            if conn and hasattr(conn, 'connected') and conn.connected():
                 current_app.logger.info('📢[SocketIO pgAgent] Closing connection for server %s, client %s', 
                                   sid, client_sid)
                 
@@ -444,8 +453,13 @@ def handle_client_disconnect(event=None):
                     current_app.logger.warning('📢[SocketIO pgAgent] Error during UNLISTEN: %s', str(e))
                 
                 try:
-                    # Close the connection
-                    conn.close()
+                    # Close the connection if it has a close method
+                    if hasattr(conn, 'close'):
+                        conn.close()
+                    elif hasattr(conn, 'release'):
+                        conn.release()
+                    else:
+                        current_app.logger.warning('📢[SocketIO pgAgent] Connection object has no close or release method')
                 except Exception as e:
                     current_app.logger.warning('📢[SocketIO pgAgent] Error closing connection: %s', str(e))
             
@@ -471,151 +485,509 @@ def handle_client_disconnect(event=None):
     current_app.logger.info('📢[SocketIO pgAgent] Disconnect cleanup complete. %d remaining active listeners', 
                       remaining_listeners)
 
-# Define a background task for checking notifications
-def check_job_status_notifications(app, sid, client_sid, user):
+def with_app_context(func):
+    """Decorator to ensure function runs in application context"""
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        # Get the app object safely
+        if hasattr(current_app, '_get_current_object'):
+            app = current_app._get_current_object()
+        else:
+            app = current_app
+            
+        # Check if we're already in an app context
+        if flask.has_app_context():
+            return func(*args, **kwargs)
+        else:
+            # Create a new app context
+            with app.app_context():
+                return func(*args, **kwargs)
+
+    return wrapper
+
+def check_job_status_notifications(app, sid, client_sid):
     """
     Background task to check for notifications and emit them to the client
+    with improved robustness for cursor loss and connection issues
     """
-    # Import the exception class for error handling
-    from pgadmin.utils.exception import CryptKeyMissing  
+    from pgadmin.utils.exception import CryptKeyMissing
+    import json
+    import traceback
+    from datetime import datetime
+
+    # Core variables for connection management
+    reconnect_attempts = 0
+    max_reconnect_attempts = 5
+    base_sleep_time = 1.0
+    connection_age = 0
+    max_connection_age = 600  # 10 minutes
+    last_cursor_recovery = None
+    notification_count = 0
 
     with app.app_context():
-
-        login_user(user)
-
-        # Use the app parameter that was passed to the function
-        app.logger.info('🚀 [SocketIO pgAgent] Starting job status notifications listener for session %s, server %s', 
-                    client_sid, sid)
+        app.logger.info('[SocketIO pgAgent] Starting notifications listener for server %s, client %s', sid, client_sid)
 
         try:
             # Validate active listener exists
             if sid not in active_listeners or client_sid not in active_listeners[sid]:
-                app.logger.error('❌ [SocketIO pgAgent] No active listener found for server %s, client %s', 
-                            sid, client_sid)
+                app.logger.error('[SocketIO pgAgent] No active listener found for server %s, client %s', sid, client_sid)
                 return
                 
-            conn = active_listeners[sid][client_sid]
+            conn = active_listeners[sid][client_sid]['conn']
             
             if not conn or not conn.connected():
-                app.logger.error('❌ [SocketIO pgAgent] Connection not available or not connected for server %s', sid)
+                app.logger.error('[SocketIO pgAgent] Connection not available for server %s', sid)
                 return
-                
-            # Always set up the LISTEN command, regardless of whether we're already listening
-            try:
-                with app.test_request_context():  # Ensures a valid request context
-                    app.logger.info('🔄 [SocketIO pgAgent] Setting up LISTEN command for job_status_update')
-                    conn.execute_dict("LISTEN job_status_update")
-                    app.logger.info('👤 [SocketIO pgAgent] Running as user: %s', user.email)
-
-                                # Log current listening channels for debugging
-                    status, channels = conn.execute_dict("SELECT channel FROM pg_listening_channels()")
-                    if status and 'rows' in channels:
-                        app.logger.info('📢 [SocketIO pgAgent] Current listening channels: %s', 
-                                    str([row['channel'] for row in channels['rows']]))
-                    else:
-                        app.logger.warning('⚠️ [SocketIO pgAgent] Could not query listening channels after LISTEN command')
-
-            except CryptKeyMissing as e:
-                app.logger.error('❌ [SocketIO pgAgent] Crypto key missing error, cannot access connection credentials: %s', str(e))
-                app.logger.debug('This typically occurs when a background thread cannot access the master password')
-                return
-            except Exception as e:
-                app.logger.error('❌ [SocketIO pgAgent] Error setting up LISTEN command: %s', str(e))
-                app.logger.debug('❌ [SocketIO pgAgent] Exception details: %s', traceback.format_exc())
-                
-            # Count notifications for logging
-            notification_count = 0
-            last_activity_time = datetime.now()
             
-            # Continue as long as the connection is active and client is still connected
-            while sid in active_listeners and client_sid in active_listeners[sid] and \
-                    conn.connected() and socketio.server.manager.is_connected(client_sid, namespace=SOCKETIO_NAMESPACE):
+            # Function to establish or re-establish LISTEN command
+            @with_app_context
+            def setup_listener():
+                nonlocal connection_age
                 
-                # Log periodic status updates
-                current_time = datetime.now()
-                time_diff = (current_time - last_activity_time).total_seconds()
-                if time_diff > 60:  # Log status every minute
-                    last_activity_time = current_time
-                    app.logger.info('💓 [SocketIO pgAgent] Notification checker still running for client %s, server %s. Count: %d', 
-                                client_sid, sid, notification_count)
+                with app.test_request_context():
+                    user = active_listeners[sid][client_sid]['user']
                     
-                    # Periodically check if we're still listening and reestablish if needed
-                    # Create a new app context for operations that need it
+                    # Set up user context
+                    if hasattr(app, 'login_manager'):
+                        app.login_manager._update_request_context_with_user(user)
+                    
+                    # Configure connection settings
                     try:
-                        status, channels = conn.execute_dict("SELECT channel FROM pg_listening_channels()")
-                        if status and 'rows' in channels:
+                        # First make sure we're not in a transaction
+                        try:
+                            conn.execute_void("ROLLBACK")
+                        except Exception:
+                            pass  # Ignore errors in rollback
+            
+                        conn.execute_void("BEGIN")
+                        conn.execute_void("SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL READ COMMITTED")
+                        conn.execute_void("SET statement_timeout = 10000")
+                        conn.execute_void("SET tcp_keepalives_idle = 60")
+                        conn.execute_void("SET tcp_keepalives_interval = 30")
+                        conn.execute_void("SET tcp_keepalives_count = 5")
+                        conn.execute_void("COMMIT")
+                    except Exception as e:
+                        app.logger.warning('[SocketIO pgAgent] Error setting session parameters: %s', str(e))
+                        try:
+                            conn.execute_void("ROLLBACK")
+                        except:
+                            pass
+                    
+                    # Establish LISTEN
+                    try:
+                        status, result = conn.execute_void("LISTEN job_status_update")
+                        if status:
+                            connection_age = 0
+                            status, channels = conn.execute_dict("SELECT pg_listening_channels() AS channel")
+                            if not status or 'rows' not in channels:
+                                app.logger.error('[SocketIO pgAgent] Could not verify LISTEN channels')
+                                return False
+                                
                             has_pgagent_channel = any(row['channel'] == 'job_status_update' for row in channels['rows'])
                             if not has_pgagent_channel:
-                                app.logger.warning('⚠️ [SocketIO pgAgent] Lost listen on job_status_update channel, reestablishing...')
-                                conn.execute_dict("LISTEN job_status_update")
-                        else:
-                            app.logger.warning('⚠️ [SocketIO pgAgent] Could not query listening channels in heartbeat check')
-                            # Try to reestablish the LISTEN just in case
-                            conn.execute_dict("LISTEN job_status_update")
+                                app.logger.error('[SocketIO pgAgent] LISTEN command succeeded but channel not active')
+                                return False
+                            return True
+                        return False
                     except Exception as e:
-                        app.logger.error('❌ [SocketIO pgAgent] Error in listen heartbeat check: %s', str(e))
+                        app.logger.error('[SocketIO pgAgent] Error executing LISTEN command: %s', str(e))
+                        return False
+            
+            # Function to create a new connection when needed
+            @with_app_context
+            def create_new_connection():
+                nonlocal conn, reconnect_attempts, last_cursor_recovery
+                
+                with app.test_request_context():
+                    user = active_listeners[sid][client_sid]['user']
+                    
+                    if hasattr(app, 'login_manager'):
+                        app.login_manager._update_request_context_with_user(user)
+                    
+                    from pgadmin.utils.driver import get_driver
+                    driver = get_driver(PG_DEFAULT_DRIVER)
+                    manager = driver.connection_manager(sid)
+                    
+                    if not manager:
+                        app.logger.error('[SocketIO pgAgent] Failed to get connection manager')
+                        return False
+                    
+                    try:
+                        # Try to get server details for potential direct connection
+                        server_info = None
+                        try:
+                            temp_conn = manager.connection()
+                            if temp_conn:
+                                if hasattr(temp_conn, 'get_server_details'):
+                                    server_info = temp_conn.get_server_details()
+                                elif hasattr(manager, 'get_server_by_id'):
+                                    server = manager.get_server_by_id(sid)
+                                    if server:
+                                        server_info = {
+                                            'host': server.host,
+                                            'port': server.port,
+                                            'database': server.db,
+                                            'username': server.user,
+                                            'password': server.password
+                                        }
+                        except Exception as e:
+                            app.logger.warning('[SocketIO pgAgent] Could not retrieve server details: %s', str(e))
+                        
+                        if server_info:
+                            active_listeners[sid][client_sid]['server_info'] = server_info
+                        
+                        # Release old connection if possible
+                        old_conn_id = getattr(conn, 'conn_id', None)
+                        if old_conn_id and hasattr(manager, 'release'):
+                            try:
+                                manager.release(old_conn_id)
+                            except Exception as e:
+                                app.logger.warning('[SocketIO pgAgent] Error releasing connection: %s', str(e))
+                        
+                        # Create new connection
+                        new_conn = manager.connection()
+                        
+                        # ENHANCED VERIFICATION - Test connection immediately
+                        if new_conn:
+                            try:
+                                # Try a simple query to verify connection works
+                                status, _ = new_conn.execute_scalar("SELECT 1 AS verify_connection")
+                                
+                                if status:
+                                    active_listeners[sid][client_sid]['conn'] = new_conn
+                                    conn = new_conn
+                                    last_cursor_recovery = datetime.now()
+                                    reconnect_attempts = 0
+                                    return True
+                                else:
+                                    app.logger.error('[SocketIO pgAgent] New connection verification query failed')
+                            except Exception as e:
+                                app.logger.error('[SocketIO pgAgent] New connection verification error: %s', str(e))
+                        
+                        app.logger.error('[SocketIO pgAgent] Created connection but it is not connected')
+                        reconnect_attempts += 1
+                        return False
+                    except Exception as e:
+                        app.logger.error('[SocketIO pgAgent] Error creating new connection: %s', str(e))
+                        reconnect_attempts += 1
+                        return False
+            
+            # Function to handle notifications
+            @with_app_context
+            def process_notifications():
+                nonlocal notification_count
                 
                 try:
-                    # Check for notifications using poll with a timeout
-                    if conn.poll() == 1:
+                    notify = conn.get_notification()
+                    
+                    while notify:
+                        if notify.channel == 'job_status_update':
+                            notification_count += 1
+                            try:
+                                payload = json.loads(notify.payload)
+                                
+                                if payload.get('test', False) is True:
+                                    app.logger.info('[SocketIO pgAgent] Received test notification')
+                                else:
+                                    try:
+                                        socketio.emit('job_status_update', 
+                                                   payload,
+                                                   namespace=SOCKETIO_NAMESPACE, 
+                                                   to=client_sid)
+                                    except Exception as e:
+                                        app.logger.error('[SocketIO pgAgent] Error emitting job status update: %s', str(e))
+                            except json.JSONDecodeError:
+                                app.logger.error('[SocketIO pgAgent] Invalid JSON in notification payload: %s', notify.payload)
+                            except Exception as e:
+                                app.logger.error('[SocketIO pgAgent] Error processing notification: %s', str(e))
+                        
                         try:
                             notify = conn.get_notification()
-                            
-                            while notify:                            
-                                # Process the notification if it is a job status update
-                                if notify.channel == 'job_status_update':
-                                    notification_count += 1
-                                    try:
-                                        # Parse the payload as JSON
-                                        payload = json.loads(notify.payload)
-                                        
-                                        # Add debugging to see the payload
-                                        app.logger.info('📢[SocketIO pgAgent] Notification payload: %s', str(notify.payload))
-                                        
-                                        # Emit the update to the client
-                                        socketio.emit('job_status_update', 
-                                                    payload,
-                                                    namespace=SOCKETIO_NAMESPACE, 
-                                                    to=client_sid)
-                                        app.logger.debug('📢[SocketIO pgAgent] Job status update emitted to client %s', 
-                                                        client_sid)
-                                    except json.JSONDecodeError:
-                                        app.logger.error('📢[SocketIO pgAgent] Invalid JSON in notification payload: %s', 
-                                                        notify.payload)
-                                    except Exception as e:
-                                        app.logger.error('📢[SocketIO pgAgent] Error processing notification: %s', str(e))
-                                        app.logger.debug('📢[SocketIO pgAgent] Exception details: %s', traceback.format_exc())
-                                
-                                # Get the next notification if available
-                                notify = conn.get_notification()
                         except Exception as e:
-                            app.logger.error('📢[SocketIO pgAgent] Error retrieving notification: %s', str(e))
-                            app.logger.debug('📢[SocketIO pgAgent] Exception details: %s', traceback.format_exc())
-            
-                    # Sleep briefly to avoid high CPU usage
-                    socketio.sleep(0.5)
+                            app.logger.warning('[SocketIO pgAgent] Error getting next notification: %s', str(e))
+                            break
                     
+                    return True
+                except Exception as e:
+                    app.logger.error('[SocketIO pgAgent] Error in process_notifications: %s', str(e))
+                    return False
+            
+            # Function to check if connection is alive
+            @with_app_context
+            def is_connection_alive():
+                if not conn or not conn.connected():
+                    return False
+                
+                try:
+                    status, _ = conn.execute_scalar("SELECT 1")
+                    return status
+                except Exception as e:
+                    app.logger.warning('[SocketIO pgAgent] Connection test query failed: %s', str(e))
+                    return False
+            
+            # Function to verify connection has a valid cursor
+            @with_app_context
+            def verify_connection_cursor():
+                if not conn:
+                    return False
+                    
+                try:
+                    # Test if cursor exists and works
+                    if hasattr(conn, 'cursor') and conn.cursor is not None:
+                        status, _ = conn.execute_scalar("SELECT 1")
+                        return status
+                    else:
+                        return False
+                except Exception as e:
+                    app.logger.error('[SocketIO pgAgent] Cursor verification failed: %s', str(e))
+                    return False
+            
+            # Function to check connection health
+            @with_app_context
+            def check_connection_health():
+                if not conn or not conn.connected():
+                    return False
+                
+                try:
+                    if not is_connection_alive():
+                        return False
+                    
+                    # Also verify cursor specifically
+                    if not verify_connection_cursor():
+                        return False
+                    
+                    status, channels = conn.execute_dict("SELECT pg_listening_channels() AS channel")
+                    if not status or 'rows' not in channels:
+                        return False
+                        
+                    has_pgagent_channel = any(row['channel'] == 'job_status_update' for row in channels['rows'])
+                    if not has_pgagent_channel:
+                        return False
+                        
+                    return True
+                except Exception as e:
+                    app.logger.error('[SocketIO pgAgent] Error checking connection health: %s', str(e))
+                    return False
+            
+            # Function to send test notification
+            @with_app_context
+            def send_test_notification():
+                try:
+                    test_payload = json.dumps({
+                        'test': True,
+                        'timestamp': datetime.now().isoformat(),
+                        'message': 'Test notification to verify LISTEN is working'
+                    })
+                    
+                    status, result = conn.execute_scalar(
+                        "SELECT pg_notify('job_status_update', $1::text)",
+                        (test_payload,)
+                    )
+                    
+                    if status:
+                        return True
+                    else:
+                        app.logger.warning('[SocketIO pgAgent] Failed to send test notification: %s', str(result))
+                        return False
+                except Exception as e:
+                    app.logger.warning('[SocketIO pgAgent] Error sending test notification: %s', str(e))
+                    return False
+                    
+            # Function to execute keepalive with proper context handling
+            @with_app_context
+            def perform_keepalive():
+                """Execute keepalive query with proper context handling"""
+                with app.test_request_context():
+                    user = active_listeners[sid][client_sid]['user']
+                    if hasattr(app, 'login_manager'):
+                        app.login_manager._update_request_context_with_user(user)
+                        
+                    if conn and conn.connected():
+                        try:
+                            status, _ = conn.execute_scalar("SELECT 1 AS keepalive")
+                            return status
+                        except Exception as e:
+                            app.logger.warning('[SocketIO pgAgent] Keepalive error: %s', str(e))
+                            return False
+                    return False
+                    
+            # Initialize timing variables
+            last_activity_time = datetime.now()
+            last_health_check_time = datetime.now()
+            last_heartbeat_time = datetime.now()
+            next_keepalive_time = datetime.now()
+            last_poll_success_time = datetime.now()
+            last_connection_cycle = datetime.now()
+            
+            # Intervals for connection checks
+            health_check_interval = 120  # 2 minutes
+            heartbeat_interval = 30      # 30 seconds
+            keepalive_interval = 45      # 45 seconds
+            connection_cycle_interval = 300  # 5 minutes
+            
+            # Setup initial listener
+            setup_success = setup_listener()
+            if not setup_success:
+                app.logger.error('[SocketIO pgAgent] Failed initial listener setup')
+                if create_new_connection():
+                    setup_listener()
+            
+            # Main event loop
+            while sid in active_listeners and client_sid in active_listeners[sid] and \
+                  socketio.server.manager.is_connected(client_sid, namespace=SOCKETIO_NAMESPACE):
+                
+                # Calculate sleep time based on reconnection attempts (exponential backoff)
+                sleep_time = min(base_sleep_time * (2 ** reconnect_attempts), 30)
+                
+                # Increment connection age
+                connection_age += sleep_time
+                
+                # Check if we've exceeded max reconnection attempts
+                if reconnect_attempts >= max_reconnect_attempts:
+                    app.logger.error('[SocketIO pgAgent] Exceeded maximum reconnection attempts. Terminating listener.')
+                    break
+                
+                # Current time for interval calculations
+                current_time = datetime.now()
+                
+                # Force connection cycle every X minutes regardless of other checks
+                if (current_time - last_connection_cycle).total_seconds() > connection_cycle_interval:
+                    last_connection_cycle = current_time
+                    app.logger.info('[SocketIO pgAgent] Cycling connection due to age')
+                    with app.app_context():
+                        if create_new_connection():
+                            setup_listener()
+                            connection_age = 0
+                        socketio.sleep(sleep_time)
+                        continue
+                
+                # Periodic connection age refresh
+                time_since_last_poll = (current_time - last_poll_success_time).total_seconds()
+                if connection_age >= max_connection_age and time_since_last_poll > 120:
+                    app.logger.info('[SocketIO pgAgent] Connection age limit reached, creating new connection')
+                    if create_new_connection():
+                        setup_listener()
+                        connection_age = 0
+                    socketio.sleep(sleep_time)
+                    continue
+                
+                # Periodic status logging
+                if (current_time - last_activity_time).total_seconds() > 300:
+                    last_activity_time = current_time
+                    app.logger.info('[SocketIO pgAgent] Listener running for client %s, server %s, notifications: %d', 
+                                client_sid, sid, notification_count)
+                
+                # Connection keepalive
+                if (current_time - next_keepalive_time).total_seconds() >= 0:
+                    next_keepalive_time = current_time + timedelta(seconds=keepalive_interval)
+                    
+                    if perform_keepalive():
+                        if connection_age > 60:
+                            connection_age = max(connection_age - 30, 0)
+                    else:
+                        if create_new_connection():
+                            setup_listener()
+                
+                # Heartbeat check
+                if (current_time - last_heartbeat_time).total_seconds() > heartbeat_interval:
+                    last_heartbeat_time = current_time
+                    
+                    if not is_connection_alive():
+                        app.logger.warning('[SocketIO pgAgent] Heartbeat failed, connection appears dead')
+                        if create_new_connection():
+                            setup_listener()
+                            socketio.sleep(sleep_time)
+                            continue
+                
+                # Full health check
+                if (current_time - last_health_check_time).total_seconds() > health_check_interval:
+                    last_health_check_time = current_time
+                    
+                    if not check_connection_health():
+                        app.logger.warning('[SocketIO pgAgent] Health check failed, attempting to fix')
+                        
+                        # Try to fix the connection by re-establishing LISTEN first
+                        if conn and conn.connected():
+                            if setup_listener():
+                                # Only send test notification occasionally
+                                if random.random() < 0.2:
+                                    send_test_notification()
+                                continue
+                        
+                        # If that didn't work, create a new connection
+                        if create_new_connection():
+                            setup_listener()
+                
+                # Poll for notifications
+                try:
+                    if conn and conn.connected():
+                        poll_result = conn.poll()
+                        
+                        if isinstance(poll_result, tuple) and poll_result[0] == False:
+                            # Handle error in poll result
+                            error_msg = str(poll_result[1]) if len(poll_result) > 1 else "Unknown error"
+                            
+                            # Check for cursor errors - expanded pattern list
+                            cursor_error_patterns = ["cursor", "no active sql", "connection", "closed", "reset", 
+                                                    "broken", "not connected", "async", "context"]
+                            is_cursor_error = any(pattern in error_msg.lower() for pattern in cursor_error_patterns)
+                            
+                            if is_cursor_error:
+                                app.logger.warning("[SocketIO pgAgent] Cursor error: %s", error_msg)
+                                
+                                # For cursor errors, always create a new connection (don't try to salvage)
+                                with app.app_context():
+                                    if create_new_connection():
+                                        setup_listener()
+                                    else:
+                                        reconnect_attempts += 1
+                            else:
+                                app.logger.error("[SocketIO pgAgent] Unhandled poll error: %s", error_msg)
+                                reconnect_attempts += 1
+                        elif poll_result == 1:
+                            # Process notifications
+                            process_success = process_notifications()
+                            if process_success:
+                                reconnect_attempts = 0
+                                last_poll_success_time = datetime.now()
+                            else:
+                                # If processing failed, try to reset connection
+                                app.logger.warning('[SocketIO pgAgent] Notification processing failed, checking connection')
+                                if not is_connection_alive():
+                                    create_new_connection()
+                                    setup_listener()
+                    else:
+                        app.logger.warning('[SocketIO pgAgent] Connection lost, attempting to reconnect')
+                        create_new_connection()
+                        setup_listener()
+                
                 except CryptKeyMissing as e:
-                    app.logger.error('❌ [SocketIO pgAgent] Crypto key missing error during polling: %s', str(e))
-                    app.logger.debug('This typically occurs when a background thread cannot access the master password')
+                    app.logger.error('[SocketIO pgAgent] Crypto key missing: %s', str(e))
                     return
                 except Exception as e:
-                    app.logger.error('📢[SocketIO pgAgent] Error in notification loop: %s', str(e))
-                    app.logger.debug('📢[SocketIO pgAgent] Exception details: %s', traceback.format_exc())
-                    socketio.sleep(1)  # Sleep a bit longer after an error
+                    app.logger.error('[SocketIO pgAgent] Error in notification loop: %s', str(e))
+                    reconnect_attempts += 1
+                    
+                    # Immediate retry if this seems to be a connection issue
+                    conn_error_indicators = ["connection", "broken", "terminate", "reset", "closed"]
+                    if any(indicator in str(e).lower() for indicator in conn_error_indicators):
+                        app.logger.info('[SocketIO pgAgent] Connection appears broken, immediate reconnect attempt')
+                        if create_new_connection():
+                            setup_listener()
+                
+                # Sleep to avoid high CPU usage
+                socketio.sleep(sleep_time)
             
-            app.logger.info('📢[SocketIO pgAgent] Notification checker ending for client %s, server %s. ' 
-                        'Total notifications: %d. Connection state: %s', 
-                        client_sid, sid, notification_count, 
-                        'Connected' if conn and conn.connected() else 'Disconnected')
+            app.logger.info('[SocketIO pgAgent] Listener ended. Total notifications: %d', notification_count)
                             
         except CryptKeyMissing as e:
-            app.logger.error('❌ [SocketIO pgAgent] Crypto key missing error in notification checker: %s', str(e))
-            app.logger.debug('This typically occurs when a background thread cannot access the master password')
+            app.logger.error('[SocketIO pgAgent] Crypto key missing: %s', str(e))
         except Exception as e:
-            app.logger.error('📢[SocketIO pgAgent] Unexpected error in notification checker: %s', str(e))
-            app.logger.error('📢[SocketIO pgAgent] Exception details: %s', traceback.format_exc())
+            app.logger.error('[SocketIO pgAgent] Unexpected error: %s', str(e))
+            app.logger.debug('[SocketIO pgAgent] Exception details: %s', traceback.format_exc())
 
+
+#################################################################
 
 blueprint = JobModule(__name__)
 
@@ -644,11 +1016,11 @@ def get_active_listeners():
                 'clients': []
             }
             
-            for client_id, conn in clients.items():
+            for client_id, conn_user in clients.items():
                 connection_status = 'unknown'
-                if conn:
+                if conn_user['conn']:
                     try:
-                        connection_status = 'connected' if conn.connected() else 'disconnected'
+                        connection_status = 'connected' if conn_user['conn'].connected() else 'disconnected'
                     except Exception as e:
                         connection_status = f'error: {str(e)}'
                 
@@ -853,20 +1225,14 @@ def test_notification_simple(sid):
         # Create both formats of notification to ensure compatibility
         payload = json.dumps({
             'job_id': job_id,
-            'job_name': 'Test Job',
             'status': 'SUCCESS',
-            'status_code': 'r',
-            'start_time': timestamp,
-            'end_time': timestamp,
-            'server_id': sid,
-            'test': True,
             'timestamp': timestamp
-        })
+        }, ensure_ascii=False, separators=(',', ':'))
         
         # Log notification channels for debugging
         current_app.logger.info('🔈 [pgAgent] Available notification channels:')
         try:
-            status, channels = conn.execute_dict("SELECT distinct channel FROM pg_listening_channels()")
+            status, channels = conn.execute_dict("SELECT pg_listening_channels() AS channel")
             if status and 'rows' in channels:
                 for channel in channels['rows']:
                     current_app.logger.info('  - %s', channel['channel'])
@@ -880,7 +1246,7 @@ def test_notification_simple(sid):
         
         # First check if we are listening to this channel
         channel = 'job_status_update'
-        status, listening = conn.execute_dict(f"SELECT count(*) as count FROM pg_listening_channels() WHERE channel = '{channel}'")
+        status, listening = conn.execute_dict(f"SELECT count(*) as count FROM (SELECT pg_listening_channels() AS channel) AS t WHERE channel = '{channel}'")
         
         if status and 'rows' in listening and listening['rows'][0]['count'] > 0:
             current_app.logger.info('✓ [pgAgent] Confirmed listening on channel "%s"', channel)
@@ -897,7 +1263,9 @@ def test_notification_simple(sid):
                 current_app.logger.error('❌ [pgAgent] Error setting up LISTEN: %s', str(e))
             
         # Send the notification
-        status, notify_result = conn.execute_dict(f"SELECT pg_notify('{channel}', '{payload}')")
+        sql = f"SELECT pg_notify('{channel}', $${payload}$$)"
+        current_app.logger.info('🔔 [pgAgent] Executing SQL: %s', sql)
+        status, notify_result = conn.execute_dict(sql)
         
         if status:
             current_app.logger.info('✓ [pgAgent] Successfully sent test notification')
@@ -907,8 +1275,9 @@ def test_notification_simple(sid):
                 'job_id': job_id,
                 'status': 'SUCCESS',
                 'server_id': sid
-            })
-            conn.execute_dict(f"SELECT pg_notify('{channel}', '{alt_payload}')")
+            }, ensure_ascii=False, separators=(',', ':'))
+            
+            conn.execute_dict(f"SELECT pg_notify('{channel}', $${alt_payload}$$)")
             
             return make_json_response(
                 data={
