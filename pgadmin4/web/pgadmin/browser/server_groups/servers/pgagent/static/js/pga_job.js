@@ -21,23 +21,6 @@ import { io as socket_io } from 'socket.io-client';
  * 
  * This module implements the pgAgent job status listener using Socket.IO.
  * 
- * Key features:
- * 1. Robust socket connection handling with proper error recovery
- * 2. Auto-reconnection with configurable timeout and retry parameters
- * 3. Keep-alive mechanism to prevent premature disconnection
- * 4. Comprehensive diagnostic tools for troubleshooting
- * 5. Proper server ID handling for PostgreSQL LISTEN/NOTIFY
- * 
- * The diagnostic tools (pgAgentSocketDiagnostics) provide functions to:
- * - Check socket environment and configuration
- * - Test direct socket connections
- * - Validate Socket.IO URLs and namespace setup
- * - Check Socket.IO module availability
- * - Fix common connection issues automatically
- * - Verify server-side connection status
- * - Request test events from the server
- * - Check job status listener initialization
- * 
  * To use diagnostic tools in browser console:
  *   pgAgentSocketDiagnostics.help()
  */
