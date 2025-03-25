@@ -234,13 +234,21 @@ define('pgadmin.node.pga_job', [
           'pgadmin-browser:tree:selected',
           function(item, data) {
             console.log('Node selected, checking if it is a pgAgent collection', data ? data._type : 'no data');
-            // Check if the selected node is a pgagent collection
+            // Check if the selected node is a pgagent collection or individual job
             if (data && (data._type === 'coll-pga_job' || data._type === 'pga_job')) {
-              console.log('pgagent collection node selected from tree selection event');
+              console.log('pgAgent node selected:', data._type);
               if (!item || !pgBrowser.tree.hasParent(item)) return;
               
-              // Get the server ID from the parent node
-              const serverItem = pgBrowser.tree.parent(item);
+              // For individual job nodes, get the server from grandparent
+              // For collection nodes, get server from parent
+              let serverItem;
+              if (data._type === 'pga_job') {
+                const collectionItem = pgBrowser.tree.parent(item);
+                serverItem = pgBrowser.tree.parent(collectionItem);
+              } else {
+                serverItem = pgBrowser.tree.parent(item);
+              }
+              
               const serverData = serverItem ? pgBrowser.tree.itemData(serverItem) : null;
               
               if (serverData && serverData._type === 'server' && serverData._id) {
@@ -459,7 +467,6 @@ define('pgadmin.node.pga_job', [
                   console.error('📢[pgAdmin pgAgent] Invalid job status update - missing status data');
                   return;
                 }
-                
                 if (!serverId) {
                   console.error('📢[pgAdmin pgAgent] Invalid job status update - missing server ID');
                   return;
@@ -469,22 +476,25 @@ define('pgadmin.node.pga_job', [
                 console.log('📢[pgAdmin pgAgent] Processing job update for server:', serverId,
                            'job:', jobId,
                            'status:', statusData || 'unknown');
-                
-                // Call the refreshJobNode method with proper error handling
-                if (jobId) {
-                  self.refreshJobNode(serverId, jobId);
-                  console.log('📢[pgAdmin pgAgent] Refreshing job node for server:', serverId, 'and job:', jobId);
-                  if(statusData === 'success'){
-                    pgAdmin.Browser.notifier.success(gettext('Job ' + jobId + ' on server: ' + serverId+' is '+statusData));
-                    }
-                    else if(statusData === 'failed'){
-                      pgAdmin.Browser.notifier.error(gettext('Job ' + jobId + ' on server: ' + serverId+' is '+statusData));
-                    }
-                } else {
-                  console.warn('📢[pgAdmin pgAgent] Job ID missing in update, refreshing all jobs');
-                  self.refreshJobs(serverId);
+                if (statusData === 'success'||statusData === 'Failure'){
+                      // Call the refreshJobNode method with proper error handling
+                    console.log('📢[pgAdmin pgAgent] Refreshing job node for server:', serverId, 'and job:', jobId,"status:",statusData);
+                  if (jobId) {
+                    self.refreshJobNode(serverId, jobId);
+                    console.log('📢[pgAdmin pgAgent] Refreshing job node for server:', serverId, 'and job:', jobId);
+                    if(statusData === 'success'){
+                      pgAdmin.Browser.notifier.success(gettext('Job ' + jobId + ' on server: ' + serverId+' is '+statusData));
+                      }
+                      else if(statusData === 'failed'){
+                        pgAdmin.Browser.notifier.error(gettext('Job ' + jobId + ' on server: ' + serverId+' is '+statusData));
+                      }
+                  } else {
+                    console.warn('📢[pgAdmin pgAgent] Job ID missing in update, refreshing all jobs');
+                    self.refreshJobs(serverId);
+                  }
                 }
-              } catch (e) {
+              }
+              catch (e) {
                 console.error('📢[pgAdmin pgAgent] Error processing job status update:', e);
                 console.error('📢[pgAdmin pgAgent] Update data:', data);
                 
@@ -556,103 +566,53 @@ define('pgadmin.node.pga_job', [
       },
 
       /* Refresh a job node when status update is received */
-      refreshJobNode: function(serverId, jobId) {
+      refreshJobNode: async function(serverId, jobId) {
         const t = pgBrowser.tree;
-        console.log('Refreshing job node for server ID:', serverId, 'and job ID:', jobId);
-
-        
         try {
-          // Get the root nodes
-          const rootNodes = t.children(t.root);
-          // Find the server group node
-          let serverGroupNode = null;
-          rootNodes.forEach((node) => {
-              const data = t.itemData(node);
-              if (data && data._type === 'server_group') {
-                  serverGroupNode = node;
-              }
-          });
+            // Find the server node first
+            const serverNode = t.findNode('server', serverId);
+            if (!serverNode) {
+                console.log('Server node not found');
+                return;
+            }
 
-          if (!serverGroupNode) {
-              console.log('Server group node not found!');
-              return;
-          }
+            // Find the pgAgent jobs collection node
+            const collNode = t.findNode('coll-pga_job', null, serverNode);
+            if (!collNode) {
+                console.log('pgAgent jobs collection node not found');
+                return;
+            }
 
-          // Find the actual server node inside the server group
-          let serverNode = null;
-          const serverGroupChildren = t.children(serverGroupNode);
+            // If we have a specific job ID, find and refresh that job
+            if (jobId) {
+                const jobNode = t.findNode('pga_job', jobId, collNode);
+                if (!jobNode) {
+                    console.log('Job node not found');
+                    return;
+                }
 
-          serverGroupChildren.forEach((node) => {
-              const data = t.itemData(node);
-              if (data && data._type === 'server' && String(data._id) === String(serverId)) {
-                  serverNode = node;
-              }
-          });
+                // Refresh the job node
+                await new Promise(resolve => {
+                    t.unload(jobNode, () => {
+                        t.refresh(jobNode, resolve);
+                    });
+                });
 
-          if (!serverNode) {
-              console.log(`Server node with ID ${serverId} not found!`);
-              return;
-          }
+                // Update node selection
+                t.select(jobNode);
+            } else {
+                // Refresh the entire collection
+                await new Promise(resolve => {
+                    t.unload(collNode, () => {
+                        t.refresh(collNode, resolve);
+                    });
+                });
+            }
 
-          // Find the pgAgent job collection node
-          let collectionNode = null;
-          t.open(serverNode);
-          const serverChildren = t.children(serverNode);
-
-          serverChildren.forEach((node) => {
-              const data = t.itemData(node);
-              if (data && data._type === 'coll-pga_job') {
-                  collectionNode = node;
-              }
-          });
-
-          if (!collectionNode) {
-              console.log('pgAgent collection node not found, cannot refresh job');
-              return;
-          }
-+          console.log("collectionNode :",collectionNode)
-          // Refresh specific job or entire collection
-          if (jobId) {
-              let jobNodetest = t.children(collectionNode).find(node => {String(t.itemData(node)?.jobid) === String(jobId)
-                console.log(node);
-                return node;
-              });
-              console.log("jobNodetest :",jobNodetest)
-              let jobNode = null;
-              console.log("collectionNode before open :",collectionNode)
-              t.open(collectionNode);
-              console.log("collectionNode after open :",collectionNode)
-              const collectionChildren = t.children(collectionNode);
-              console.log('Collection children:', collectionChildren);
-              console.log("collectionChildren :",collectionNode._children)
-              collectionChildren.forEach((node) => {
-                  console.log("node :",node)
-                  const data = t.itemData(node);
-                  if (data && data._type === 'pga_job' && String(data._id) === String(jobId)) {
-                      jobNode = node;
-                  }
-              });
-              console.log("jobNode :",jobNode)
-
-              if (jobNode) {
-                  console.log('Refreshing specific job node:', jobId);
-                  t.unload(jobNode);
-                  t.select(jobNode);
-                  t.refresh(jobNode);
-              } else {
-                  console.log('Job node not found, refreshing collection');
-                  t.unload(collectionNode);
-                  t.refresh(collectionNode);
-              }
-          } else {
-              console.log('Refreshing entire pgAgent collection');
-              t.unload(collectionNode);
-              t.refresh(collectionNode);
-          }
-
-      } catch (ex) {
-          console.error('Error refreshing job node:', ex);
-      }},
+        } catch (ex) {
+            console.error('Error refreshing job node:', ex);
+        }
+    },
 
       /* Disconnect the socket if one exists */
       disconnectJobStatusSocket: function() {
