@@ -474,6 +474,12 @@ define('pgadmin.node.pga_job', [
                 if (jobId) {
                   self.refreshJobNode(serverId, jobId);
                   console.log('📢[pgAdmin pgAgent] Refreshing job node for server:', serverId, 'and job:', jobId);
+                  if(statusData === 'success'){
+                    pgAdmin.Browser.notifier.success(gettext('Job ' + jobId + ' on server: ' + serverId+' is '+statusData));
+                    }
+                    else if(statusData === 'failed'){
+                      pgAdmin.Browser.notifier.error(gettext('Job ' + jobId + ' on server: ' + serverId+' is '+statusData));
+                    }
                 } else {
                   console.warn('📢[pgAdmin pgAgent] Job ID missing in update, refreshing all jobs');
                   self.refreshJobs(serverId);
@@ -558,13 +564,10 @@ define('pgadmin.node.pga_job', [
         try {
           // Get the root nodes
           const rootNodes = t.children(t.root);
-          console.log('Root nodes:', rootNodes);
-
           // Find the server group node
           let serverGroupNode = null;
           rootNodes.forEach((node) => {
               const data = t.itemData(node);
-              console.log('Checking node:', data);
               if (data && data._type === 'server_group') {
                   serverGroupNode = node;
               }
@@ -578,11 +581,9 @@ define('pgadmin.node.pga_job', [
           // Find the actual server node inside the server group
           let serverNode = null;
           const serverGroupChildren = t.children(serverGroupNode);
-          console.log('Server group children:', serverGroupChildren);
 
           serverGroupChildren.forEach((node) => {
               const data = t.itemData(node);
-              console.log('Checking server node:', data," id :",data._id,"target id :",serverId);
               if (data && data._type === 'server' && String(data._id) === String(serverId)) {
                   serverNode = node;
               }
@@ -595,12 +596,11 @@ define('pgadmin.node.pga_job', [
 
           // Find the pgAgent job collection node
           let collectionNode = null;
+          t.open(serverNode);
           const serverChildren = t.children(serverNode);
-          console.log('Server children:', serverChildren);
 
           serverChildren.forEach((node) => {
               const data = t.itemData(node);
-              console.log('Checking child node:', data);
               if (data && data._type === 'coll-pga_job') {
                   collectionNode = node;
               }
@@ -610,8 +610,7 @@ define('pgadmin.node.pga_job', [
               console.log('pgAgent collection node not found, cannot refresh job');
               return;
           }
-          console.log("collectionNode :",collectionNode)
-          console.log(t.open(collectionNode));  // Expand pgAgent Jobs collection
++          console.log("collectionNode :",collectionNode)
           // Refresh specific job or entire collection
           if (jobId) {
               let jobNodetest = t.children(collectionNode).find(node => {String(t.itemData(node)?.jobid) === String(jobId)
@@ -620,13 +619,15 @@ define('pgadmin.node.pga_job', [
               });
               console.log("jobNodetest :",jobNodetest)
               let jobNode = null;
+              console.log("collectionNode before open :",collectionNode)
+              t.open(collectionNode);
+              console.log("collectionNode after open :",collectionNode)
               const collectionChildren = t.children(collectionNode);
               console.log('Collection children:', collectionChildren);
-
+              console.log("collectionChildren :",collectionNode._children)
               collectionChildren.forEach((node) => {
                   console.log("node :",node)
                   const data = t.itemData(node);
-                  console.log('Checking job node:', data," jobId :",jobId," data._id :",data._id,"type of data._id :",typeof(data._id), "typeof jobId :",typeof(jobId));
                   if (data && data._type === 'pga_job' && String(data._id) === String(jobId)) {
                       jobNode = node;
                   }
