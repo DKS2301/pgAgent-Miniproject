@@ -8,30 +8,28 @@
 ##########################################################################
 
 """Implements the pgAgent Jobs Node"""
+import asyncio
 from functools import wraps
 import json
 from datetime import datetime, time, timedelta
-import select
+
+import threading
+import time
+import json
+from flask import current_app
+from datetime import datetime
+from pgadmin.utils.driver import get_driver
 import traceback
-import random
 import functools
 import logging
-import redis
 import threading
-from contextlib import contextmanager
-import psycopg2
-from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 
 from flask import render_template, request, jsonify, current_app
 import flask
 from flask_babel import gettext as _
-from flask_login import current_user, login_user
+from flask_login import current_user
 
 from config import PG_DEFAULT_DRIVER  
-
-# Import Redis and RQ modules
-from redis import Redis
-from rq import Queue
 
 from pgadmin.browser.collection import CollectionNodeModule
 from pgadmin.browser.utils import PGChildNodeView
@@ -44,30 +42,14 @@ from pgadmin.browser.server_groups.servers.pgagent.utils \
     import format_schedule_data, format_step_data
 from pgadmin import socketio
 
-# Import the worker process helper
-from pgadmin.misc.bgprocess.processes import BatchProcess
-
 # Configure logging
 logger = logging.getLogger(__name__)
-
-# Redis configuration
-REDIS_CONFIG = {
-    'host': 'localhost',
-    'port': 6379,
-    'db': 0,
-    'decode_responses': True
-}
 
 # Define the SocketIO namespace for pgAgent
 SOCKETIO_NAMESPACE = '/pgagent'
 
 # Dictionary to store server's active listeners
-# Format: {server_id: {conn_id: connection}}
 active_listeners = {}
-
-# Redis connection and queue variables
-redis_conn = None
-job_status_queue = None
 
 
 class JobModule(CollectionNodeModule):
@@ -152,34 +134,6 @@ SELECT EXISTS(
         module.
         """
         return False
-    
-    def init_redis(self,app):
-        """Initialize Redis connection and queue if Redis is configured"""
-        global redis_conn, job_status_queue
-        with app.app_context():
-            if redis_conn is not None:
-                return  # Already initialized
-                
-            try:
-                # Get Redis configuration from Flask app config
-                REDIS_URL = app.config.get('REDIS_URL', None) or \
-                            app.config.get('RQ_REDIS_URL', None) or \
-                            "redis://localhost:6379/0"
-                
-                # Initialize Redis connection
-                redis_conn = Redis.from_url(REDIS_URL)
-                
-                # Initialize job status queue
-                job_status_queue = Queue('pgagent_notifications', connection=redis_conn)
-                
-                app.logger.info(f"Redis connection established for pgAgent notifications: {REDIS_URL}")
-                return True
-            except Exception as e:
-                app.logger.error(f"Failed to initialize Redis for pgAgent notifications: {str(e)}")
-                app.logger.error(traceback.format_exc())
-                return False
-
-
 
     def register(self, app, options):
         """
@@ -192,19 +146,6 @@ SELECT EXISTS(
         from .steps import blueprint as module
         self.submodules.append(module)
 
-        # Initialize Redis connection when app context is available
-        self.init_redis(app)
-        # Initialize Redis listener for pgAgent notifications
-        try:
-            from .redis_listener import init_redis_listener
-            from pgadmin import socketio as socket_io
-            
-            # Initialize Redis listener with app and socketio
-            init_redis_listener(app, socket_io)
-        except Exception as e:
-            app.logger.error(f"Error initializing Redis listener for pgAgent: {str(e)}")
-            app.logger.debug(traceback.format_exc())
-        app.logger.info("Initialised Redis Listener succesfully..\n")
         super().register(app, options)
 
 
@@ -354,77 +295,116 @@ def start_job_status_listener(data):
                 'conn': conn, 
                 'user': current_user._get_current_object(),
                 'server_info': {
-                    'server_id': sid,
-                    'client_id': client_info.get('client_id', request.sid),
-                    'socket_id': request.sid,
-                    'started_at': datetime.now().isoformat()
+                'server_id': sid,
+                'client_id': client_info.get('client_id', request.sid),
+                'socket_id': request.sid,
+                'started_at': datetime.now().isoformat()
                 }
             }
             
-            # Get Redis connection from app config or use default
-            redis_config = current_app.config.get('REDIS_CONFIG', REDIS_CONFIG)
-            try:
-                redis_client = redis.Redis(**redis_config)
-                redis_client.ping()
-                current_app.logger.info('[SocketIO pgAgent] Successfully connected to Redis')
-            except redis.ConnectionError as e:
-                current_app.logger.error('[SocketIO pgAgent] Failed to connect to Redis: %s', str(e))
-                return
-            except Exception as e:
-                current_app.logger.error('[SocketIO pgAgent] Error initializing Redis client: %s', str(e))
-                return
-            
-            # Start Redis process thread for notification handling
-            from .redis_listener import start_redis_process
-            start_redis_process(app=current_app._get_current_object(), 
-                              sid=sid, 
-                              client_sid=request.sid,
-                              redis_client=redis_client)
-            
-            # Start a background task to check for notifications
-            def check_notifications(app):
-                with app.app_context():
-                    while True:
-                        try:
-                            # Check if we have any notifications
-                            status, result = conn.execute_dict("SELECT 1")
-                            if not status:
-                                current_app.logger.error(f"Error checking notifications: {result}")
-                                continue
+            # Run async function in a new thread
+            async def check_notifications(app, sid, client_sid):
+                """
+                Background thread to listen for pgAgent job status updates using raw PostgreSQL connection.
+                
+                Args:
+                    app: Flask application context
+                    sid: Server ID
+                """
+                max_retries = 3
+                retry_delay = 5  # seconds
+                retry_count = 0
+                
+                while retry_count < max_retries:
+                    try:
+                        with app.app_context():                            
+                            # Get server from model
+                            from pgadmin.model import Server
+                            server = Server.query.filter_by(id=sid).first()
+                            
+                            if not server:
+                                logger.error(f"Server with ID {sid} not found")
+                                return
                                 
-                            # Get notifications
-                            status, result = conn.execute_dict("SELECT pg_notifications()")
-                            if status and result and 'rows' in result:
-                                for notification in result['rows']:
-                                    try:
-                                        # Parse notification payload
-                                        payload = json.loads(notification['payload'])
-                                        
-                                        # Push to Redis queue
-                                        redis_client.rpush('pgagent:job_updates', json.dumps({
-                                            'server_id': sid,
-                                            'job_id': payload.get('job_id'),
-                                            'status': payload.get('status'),
-                                            'timestamp': datetime.now().isoformat(),
-                                            'payload': payload
-                                        }))
-                                        
-                                        current_app.logger.debug(f"Pushed notification to Redis: {payload}")
-                                    except json.JSONDecodeError as e:
-                                        current_app.logger.error(f"Error parsing notification payload: {e}")
-                                    except Exception as e:
-                                        current_app.logger.error(f"Error processing notification: {e}")
+                            # Create raw connection using psycopg
+                            import psycopg
+                            from psycopg.conninfo import make_conninfo
                             
-                            # Sleep briefly to avoid high CPU usage
-                            time.sleep(0.1)
+                            # Build connection string from server details
+                            conninfo = make_conninfo(
+                                dbname=server.maintenance_db,
+                                user=server.username,
+                                password=server.password,
+                                host=server.host,
+                                port=server.port,
+                                sslmode=server.ssl_mode if hasattr(server, 'ssl_mode') else None
+                            )
                             
-                        except Exception as e:
-                            current_app.logger.error(f"Error in notification check loop: {e}")
-                            time.sleep(1)  # Sleep longer on error
-            
-            # Start the background task with the app context
-            thread = threading.Thread(target=check_notifications, args=(current_app._get_current_object(),), daemon=True)
+                            # Create async connection
+                            async with await psycopg.AsyncConnection.connect(conninfo) as conn:
+                                # Set up notification listener
+                                async with conn.cursor() as cur:
+                                    await cur.execute("LISTEN job_status_update")
+                                    await conn.commit() 
+                                    logger.info(f"Listening for pgAgent job updates on server {sid}")
+                                
+                                # Reset retry count on successful connection
+                                retry_count = 0
+                                while True:
+                                    logger.info(f"Checking for pgAgent job updates on server {sid}")
+                                    # Process notifications
+                                    async for notify in conn.notifies():
+                                        logger.info(f"Received pgAgent job update notification: {notify}")
+                                        try:
+                                            # Parse notification payload
+                                            payload = json.loads(notify.payload)
+                                            payload['sid'] = sid
+                                            try:
+                                                socketio.emit('job_status_update', 
+                                                    payload,
+                                                    namespace=SOCKETIO_NAMESPACE, 
+                                                    to=client_sid)
+                                            except Exception as e:
+                                                    logger.error('[SocketIO pgAgent] Error emitting job status update: %s', str(e))
+                                        except json.JSONDecodeError as e:
+                                            logger.error(f"Error parsing notification payload: {e}")
+                                        except Exception as e:
+                                            logger.error(f"Error processing notification: {e}")
+                                        
+                    except Exception as e:
+                        retry_count += 1
+                        logger.error(f"Error in notification listener (attempt {retry_count}/{max_retries}): {e}")
+                        logger.error(traceback.format_exc())
+                        
+                        if retry_count < max_retries:
+                            logger.info(f"Retrying connection in {retry_delay} seconds...")
+                            await asyncio.sleep(retry_delay)
+                        else:
+                            logger.error("Max retries exceeded. Stopping notification listener.")
+                            break
+                            
+                logger.info(f"Notification listener stopped for server {sid}")
+
+            def start_job_status_listener(app, sid, client_sid):
+                """Start the notification listener in a new event loop"""
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    loop.run_until_complete(check_notifications(app, sid, client_sid))
+                except Exception as e:
+                    logger.error(f"Error in notification listener thread: {e}")
+                    logger.error(traceback.format_exc())
+                finally:
+                    loop.close()
+
+            client_sid = request.sid
+            thread = threading.Thread(
+                target=start_job_status_listener, 
+                args=(current_app._get_current_object(), sid, client_sid), 
+                daemon=True
+            )
             thread.start()
+
             
             # Send success response to client
             socketio.emit('job_status_listener_started', {
@@ -696,251 +676,6 @@ def get_active_listeners():
             success=0,
             errormsg=f"Error collecting listener information: {str(e)}"
         )
-
-# Add a diagnostic endpoint to test notifications
-@blueprint.route('/debug/test_notification/<int:sid>', methods=['GET'])
-def test_notification(sid):
-    """
-    Send a test notification to simulate a pgAgent job status update
-    This is useful for debugging Socket.IO notification handling
-    """
-    from flask import current_app
-    
-    # Only allow in DEBUG mode
-    if not current_app.debug:
-        return make_json_response(
-            success=0,
-            errormsg="This endpoint is only available in DEBUG mode"
-        )
-    
-    try:
-        # Get the server connection
-        manager = get_driver(PG_DEFAULT_DRIVER).connection_manager(sid)
-        if not manager:
-            return make_json_response(
-                success=0,
-                errormsg=f"Could not find connection manager for server ID {sid}"
-            )
-        
-        conn = manager.connection()
-        if not conn:
-            return make_json_response(
-                success=0,
-                errormsg=f"Could not get connection for server ID {sid}"
-            )
-        
-        # Create a test notification 
-        current_app.logger.info(f"Sending test notification for server {sid}")
-        
-        test_payload = json.dumps({
-            "job_id": 1,
-            "status": "running",
-            "timestamp": datetime.now().isoformat()
-        })
-        
-        # Use NOTIFY to simulate a pgAgent job status update
-        sql = f"NOTIFY job_status_update, '{test_payload}';"
-        status, result = conn.execute_scalar(sql)
-        
-        if not status:
-            return make_json_response(
-                success=0,
-                errormsg=f"Failed to execute NOTIFY command: {result}"
-            )
-        
-        current_app.logger.info(f"Test notification sent for server {sid}")
-        
-        return make_json_response(
-            success=1,
-            data={
-                "message": "Test notification sent",
-                "server_id": sid,
-                "timestamp": datetime.now().isoformat()
-            }
-        )
-    except Exception as e:
-        current_app.logger.error(f"Error sending test notification: {str(e)}")
-        current_app.logger.error(f"Exception details: {traceback.format_exc()}")
-        return make_json_response(
-            success=0,
-            errormsg=f"Error sending test notification: {str(e)}"
-        )
-
-# Add a direct test endpoint that can be used more easily for testing
-@blueprint.route('/test_notification_direct/<int:sid>', methods=['GET'])
-def test_notification_direct(sid):
-    """A simpler test notification endpoint that will work in any mode"""
-    try:
-        # Get the server connection
-        manager = get_driver(PG_DEFAULT_DRIVER).connection_manager(sid)
-        if not manager:
-            return make_json_response(
-                success=0,
-                errormsg=f"Could not find connection manager for server ID {sid}"
-            )
-        
-        conn = manager.connection()
-        if not conn:
-            return make_json_response(
-                success=0,
-                errormsg=f"Could not get connection for server ID {sid}"
-            )
-        
-        # Create a test notification 
-        current_app.logger.info(f"Sending direct test notification for server {sid}")
-        
-        test_payload = json.dumps({
-            "job_id": 1,
-            "status": "running",
-            "timestamp": datetime.now().isoformat()
-        })
-        
-        # Use NOTIFY to simulate a pgAgent job status update
-        sql = f"NOTIFY job_status_update, '{test_payload}';"
-        status, result = conn.execute_scalar(sql)
-        
-        if not status:
-            return make_json_response(
-                success=0,
-                errormsg=f"Failed to execute NOTIFY command: {result}"
-            )
-        
-        current_app.logger.info(f"Direct test notification sent for server {sid}")
-        
-        return make_json_response(
-            success=1,
-            data={
-                "message": "Test notification sent directly",
-                "server_id": sid,
-                "timestamp": datetime.now().isoformat()
-            }
-        )
-    except Exception as e:
-        current_app.logger.error(f"Error sending direct test notification: {str(e)}")
-        current_app.logger.error(f"Exception details: {traceback.format_exc()}")
-        return make_json_response(
-            success=0,
-            errormsg=f"Error sending direct test notification: {str(e)}"
-        )
-
-# Simple test endpoint that works without restrictions for easy debugging
-@blueprint.route('/test_notification_simple/<int:sid>', methods=['GET'])
-def test_notification_simple(sid):
-    """
-    Simple test endpoint to send a notification for a given server.
-    This endpoint is for diagnostics and doesn't require any authentication beyond 
-    the existing session.
-    
-    Args:
-        sid: Server ID
-        
-    Returns:
-        Response with the status of the notification attempt
-    """
-    current_app.logger.info('🔍 [pgAgent] Received simple test notification request for server %s', str(sid))
-    
-    try:
-        # Get the server from the session
-        manager = get_driver(PG_DEFAULT_DRIVER).connection_manager(sid)
-        conn = manager.connection()
-        
-        if not conn:
-            current_app.logger.error('❌ [pgAgent] Server connection not found for %s', str(sid))
-            return make_json_response(
-                success=False,
-                errormsg='Server connection not found. Please connect to the server first.'
-            )
-            
-        # Create a test payload
-        import datetime
-        import json
-        import uuid
-        
-        job_id = str(uuid.uuid4())
-        timestamp = datetime.datetime.now().isoformat()
-        
-        # Create both formats of notification to ensure compatibility
-        payload = json.dumps({
-            'job_id': job_id,
-            'status': 'SUCCESS',
-            'timestamp': timestamp
-        }, ensure_ascii=False, separators=(',', ':'))
-        
-        # Log notification channels for debugging
-        current_app.logger.info('🔈 [pgAgent] Available notification channels:')
-        try:
-            status, channels = conn.execute_dict("SELECT pg_listening_channels() AS channel")
-            if status and 'rows' in channels:
-                for channel in channels['rows']:
-                    current_app.logger.info('  - %s', channel['channel'])
-            else:
-                current_app.logger.warning('⚠️ [pgAgent] Could not query listening channels')
-        except Exception as e:
-            current_app.logger.error('❌ [pgAgent] Error querying listening channels: %s', str(e))
-            
-        # Send notification using the NOTIFY command with the pgagent_jobs_status channel
-        current_app.logger.info('🔔 [pgAgent] Sending test notification on channel "job_status_update" with payload: %s', payload)
-        
-        # First check if we are listening to this channel
-        channel = 'job_status_update'
-        status, listening = conn.execute_dict(f"SELECT count(*) as count FROM (SELECT pg_listening_channels() AS channel) AS t WHERE channel = '{channel}'")
-        
-        if status and 'rows' in listening and listening['rows'][0]['count'] > 0:
-            current_app.logger.info('✓ [pgAgent] Confirmed listening on channel "%s"', channel)
-        else:
-            current_app.logger.warning('⚠️ [pgAgent] Not currently listening on channel "%s"', channel)
-            current_app.logger.info('🔄 [pgAgent] Setting up LISTEN command for "%s"', channel)
-            try:
-                status, result = conn.execute_dict(f"LISTEN {channel}")
-                if status:
-                    current_app.logger.info('✓ [pgAgent] Successfully set up LISTEN for "%s"', channel)
-                else:
-                    current_app.logger.warning('⚠️ [pgAgent] Failed to LISTEN on "%s": %s', channel, str(result))
-            except Exception as e:
-                current_app.logger.error('❌ [pgAgent] Error setting up LISTEN: %s', str(e))
-            
-        # Send the notification
-        sql = f"SELECT pg_notify('{channel}', $${payload}$$)"
-        current_app.logger.info('🔔 [pgAgent] Executing SQL: %s', sql)
-        status, notify_result = conn.execute_dict(sql)
-        
-        if status:
-            current_app.logger.info('✓ [pgAgent] Successfully sent test notification')
-            # Also log a notification with a different format for testing
-            alt_payload = json.dumps({
-                'message': 'Job status updated',
-                'job_id': job_id,
-                'status': 'SUCCESS',
-                'server_id': sid
-            }, ensure_ascii=False, separators=(',', ':'))
-            
-            conn.execute_dict(f"SELECT pg_notify('{channel}', $${alt_payload}$$)")
-            
-            return make_json_response(
-                data={
-                    'success': True,
-                    'channel': channel,
-                    'job_id': job_id,
-                    'server_id': sid,
-                    'message': 'Test notification sent successfully',
-                    'payload': payload
-                }
-            )
-        else:
-            current_app.logger.error('❌ [pgAgent] Failed to send test notification: %s', str(notify_result))
-            return make_json_response(
-                success=False,
-                errormsg=f'Failed to send test notification: {str(notify_result)}'
-            )
-    except Exception as e:
-        import traceback
-        current_app.logger.error('❌ [pgAgent] Exception in test_notification_simple: %s', str(e))
-        current_app.logger.error(traceback.format_exc())
-        return make_json_response(
-            success=False,
-            errormsg=f'Exception while sending test notification: {str(e)}'
-        )
-
 
 class JobView(PGChildNodeView):
     node_type = blueprint.node_type
