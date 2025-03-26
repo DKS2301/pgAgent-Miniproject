@@ -275,3 +275,112 @@ If you wish to discuss pgAdmin 4, or contribute to the project, please use the
 pgAdmin Hackers mailing list:
 
 pgadmin-hackers@postgresql.org
+
+# pgAdmin 4 - Real-Time Job Status Updates
+
+## Overview
+pgAdmin 4 now includes a powerful real-time job status update feature that provides instant notifications and visual feedback for pgAgent job executions. This feature enhances the user experience by providing immediate visibility into job execution status without requiring manual refresh.
+
+![pgAdmin Job Status Update](docs/images/job_status_update.png)
+
+## Features
+- Real-time job status notifications
+- Visual feedback with animated refresh effects
+- Interactive notification buttons for manual refresh
+- Automatic reconnection handling
+- Keep-alive mechanism to maintain connection stability
+- Detailed logging for debugging and monitoring
+
+## Technical Architecture
+
+### Socket.IO Integration
+The feature uses Socket.IO for real-time communication between the server and client:
+- WebSocket-based communication for low latency
+- Fallback to long-polling when WebSocket is not available
+- Automatic reconnection handling
+- Namespace-based routing for pgAgent events
+
+### Changed Files
+The following files were modified to implement the real-time job status update feature:
+
+1. **Web Client Files**:
+   - [pga_job.js](https://github.com/pgadmin-org/pgadmin4/blob/master/web/pgadmin/browser/server_groups/servers/pgagent/static/js/pga_job.js)
+     - Main implementation file containing socket connection, event handling, and UI refresh logic
+   - [pga_job.ui.js](https://github.com/pgadmin-org/pgadmin4/blob/master/web/pgadmin/browser/server_groups/servers/pgagent/static/js/pga_job.ui.js)
+     - UI components and event bindings for job management
+
+2. **Server Files**:
+   - [pgagent.py](https://github.com/pgadmin-org/pgadmin4/blob/master/web/pgadmin/browser/server_groups/servers/pgagent/pgagent.py)
+     - Server-side implementation of pgAgent functionality
+   - [socket_io.py](https://github.com/pgadmin-org/pgadmin4/blob/master/web/pgadmin/socket_io.py)
+     - Socket.IO server implementation and event handlers
+
+3. **Configuration Files**:
+   - [config.py](https://github.com/pgadmin-org/pgadmin4/blob/master/web/pgadmin/config.py)
+     - WebSocket and notification configuration settings
+
+### Browser Tree Integration
+The feature integrates with pgAdmin's browser tree structure:
+- Automatic node discovery and refresh
+- Hierarchical refresh mechanism
+- Visual feedback during updates
+- Proper node selection and visibility
+
+### Notification System
+Enhanced notification system with:
+- Success/Error status indicators
+- Interactive refresh buttons
+- Detailed status messages
+- Server and job identification
+
+
+## Visual Feedback
+The feature provides several types of visual feedback:
+1. Animated refresh effects on nodes
+2. Status-specific notification colors
+3. Interactive refresh buttons
+4. Progress indicators during updates
+
+## Error Handling
+Comprehensive error handling for:
+- Connection failures
+- Node discovery issues
+- Refresh operation failures
+- Invalid status updates
+
+## Logging and Debugging
+Detailed logging system for:
+- Connection events
+- Status updates
+- Error conditions
+- Node operations
+
+## Browser Support
+- Modern web browsers with WebSocket support
+- Fallback mechanisms for older browsers
+- Cross-browser compatibility
+
+## Security
+- Secure WebSocket connections
+- Server-side validation
+- Client authentication
+- Data sanitization
+
+## Performance Considerations
+- Efficient node refresh algorithms
+- Optimized event handling
+- Resource cleanup
+- Connection management
+
+## Future Enhancements
+1. Batch status updates
+2. Custom notification preferences
+3. Advanced filtering options
+4. Historical status tracking
+5. Performance metrics
+
+## Contributing
+Contributions are welcome! Please read our contributing guidelines before submitting pull requests.
+
+## License
+This feature is part of pgAdmin 4 and is released under the PostgreSQL License.

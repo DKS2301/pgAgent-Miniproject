@@ -10,9 +10,9 @@
 /* The DataGridView component is based on react-table component */
 
 import { DataGridFormHeader } from './formHeader.jsx';
-import { DataGridHeader } from './header';
-import { getMappedCell } from './mappedCell';
-import DataGridView from './grid';
+import { DataGridHeader } from './header.jsx';
+import { getMappedCell } from './mappedCell.jsx';
+import DataGridView from './grid.jsx';
 
 
 export default DataGridView;

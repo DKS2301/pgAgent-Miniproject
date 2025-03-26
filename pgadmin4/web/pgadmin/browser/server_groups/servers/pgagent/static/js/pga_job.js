@@ -483,10 +483,24 @@ define('pgadmin.node.pga_job', [
                     self.refreshJobNode(serverId, jobId);
                     console.log('📢[pgAdmin pgAgent] Refreshing job node for server:', serverId, 'and job:', jobId);
                     if(statusData === 'success'){
-                      pgAdmin.Browser.notifier.success(gettext('Job ' + jobId + ' on server: ' + serverId+' is '+statusData));
+                      pgAdmin.Browser.notifier.success(gettext('Job ' + jobId + ' on server: ' + serverId+' is '+statusData), {
+                        buttons: [{
+                          text: gettext('Refresh'),
+                          click: function() {
+                            self.refreshJobNode(serverId, jobId);
+                          }
+                        }]
+                      });
                       }
                       else if(statusData === 'failed'){
-                        pgAdmin.Browser.notifier.error(gettext('Job ' + jobId + ' on server: ' + serverId+' is '+statusData));
+                        pgAdmin.Browser.notifier.error(gettext('Job ' + jobId + ' on server: ' + serverId+' is '+statusData), {
+                          buttons: [{
+                            text: gettext('Refresh'),
+                            click: function() {
+                              self.refreshJobNode(serverId, jobId);
+                            }
+                          }]
+                        });
                       }
                   } else {
                     console.warn('📢[pgAdmin pgAgent] Job ID missing in update, refreshing all jobs');
@@ -569,48 +583,122 @@ define('pgadmin.node.pga_job', [
       refreshJobNode: async function(serverId, jobId) {
         const t = pgBrowser.tree;
         try {
-            // Find the server node first
+            console.log('[pgAgent] Starting job node refresh for server:', serverId, 'job:', jobId);
+            
+            // First find the server node
             const serverNode = t.findNode('server', serverId);
             if (!serverNode) {
-                console.log('Server node not found');
-                return;
+                console.log('[pgAgent] Server node not found, attempting to refresh root');
+                // Get the root node using the correct method
+                const rootNode = t.getRoot();
+                if (rootNode) {
+                    await new Promise(resolve => {
+                        t.refresh(rootNode, resolve);
+                    });
+                    // Try finding server node again after root refresh
+                    const refreshedServerNode = t.findNode('server', serverId);
+                    if (!refreshedServerNode) {
+                        console.error('[pgAgent] Server node still not found after root refresh');
+                        return;
+                    }
+                    serverNode = refreshedServerNode;
+                } else {
+                    console.error('[pgAgent] Root node not found');
+                    return;
+                }
             }
 
-            // Find the pgAgent jobs collection node
+            // Find the pgAgent jobs collection node under the server
             const collNode = t.findNode('coll-pga_job', null, serverNode);
             if (!collNode) {
-                console.log('pgAgent jobs collection node not found');
-                return;
+                console.log('[pgAgent] Jobs collection node not found, refreshing server');
+                await new Promise(resolve => {
+                    t.refresh(serverNode, resolve);
+                });
+                
+                // Try finding collection node again after server refresh
+                const refreshedCollNode = t.findNode('coll-pga_job', null, serverNode);
+                if (!refreshedCollNode) {
+                    console.error('[pgAgent] Jobs collection node still not found after server refresh');
+                    return;
+                }
+                collNode = refreshedCollNode;
             }
 
             // If we have a specific job ID, find and refresh that job
             if (jobId) {
                 const jobNode = t.findNode('pga_job', jobId, collNode);
                 if (!jobNode) {
-                    console.log('Job node not found');
-                    return;
+                    console.log('[pgAgent] Job node not found, refreshing collection');
+                    await new Promise(resolve => {
+                        t.refresh(collNode, resolve);
+                    });
+                    
+                    // Try finding job node again after collection refresh
+                    const refreshedJobNode = t.findNode('pga_job', jobId, collNode);
+                    if (!refreshedJobNode) {
+                        console.error('[pgAgent] Job node still not found after collection refresh');
+                        return;
+                    }
+                    jobNode = refreshedJobNode;
                 }
 
-                // Refresh the job node
-                await new Promise(resolve => {
-                    t.unload(jobNode, () => {
-                        t.refresh(jobNode, resolve);
-                    });
-                });
-
-                // Update node selection
-                t.select(jobNode);
-            } else {
-                // Refresh the entire collection
+                console.log('[pgAgent] Found job node, performing refresh');
+                
+                // First refresh the collection to ensure we have the latest data
                 await new Promise(resolve => {
                     t.unload(collNode, () => {
                         t.refresh(collNode, resolve);
                     });
                 });
+
+                // Then refresh the specific job node with animation
+                await new Promise(resolve => {
+                    // Add a visual refresh effect
+                    $(jobNode).addClass('refreshing');
+                    
+                    // Unload and refresh the job node
+                    t.unload(jobNode, () => {
+                        t.refresh(jobNode, () => {
+                            // Remove the refresh effect after a short delay
+                            setTimeout(() => {
+                                $(jobNode).removeClass('refreshing');
+                                resolve();
+                            }, 500);
+                        });
+                    });
+                });
+
+                // Update node selection and ensure it's visible
+                t.select(jobNode);
+                t.show(jobNode);
+                
+                console.log('[pgAgent] Job node refresh completed successfully');
+            } else {
+                // Refresh the entire collection with animation
+                console.log('[pgAgent] No specific job ID, refreshing entire collection');
+                await new Promise(resolve => {
+                    // Add a visual refresh effect to the collection
+                    $(collNode).addClass('refreshing');
+                    
+                    t.unload(collNode, () => {
+                        t.refresh(collNode, () => {
+                            // Remove the refresh effect after a short delay
+                            setTimeout(() => {
+                                $(collNode).removeClass('refreshing');
+                                resolve();
+                            }, 500);
+                        });
+                    });
+                });
+                
+                console.log('[pgAgent] Collection refresh completed successfully');
             }
 
         } catch (ex) {
-            console.error('Error refreshing job node:', ex);
+            console.error('[pgAgent] Error refreshing job node:', ex);
+            // Show error notification to user
+            pgAdmin.Browser.notifier.error(gettext('Failed to refresh job status. Please try again.'));
         }
     },
 
