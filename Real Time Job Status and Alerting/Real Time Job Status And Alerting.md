@@ -88,7 +88,7 @@ void SendEmail(const std::string &subject, const std::string &body) { ... }
 ---
 
 ## Workflow
-> Suggested Diagram:  
+> Real Time Job Status Workflow :  
 <img src="./images/workflow.png" alt="System Architecture"/>
 ---
 
