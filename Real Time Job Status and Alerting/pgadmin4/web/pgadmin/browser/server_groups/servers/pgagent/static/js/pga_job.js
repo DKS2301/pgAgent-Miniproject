@@ -61,6 +61,7 @@ define('pgadmin.node.pga_job', [
       // Flag to track if we've already set up listeners
       _listenerInitialized: false,
       _listenerActive: false,
+      _socketConnected: false,
             
       Init: function() {
         /* Avoid mulitple registration of menus */
@@ -233,6 +234,11 @@ define('pgadmin.node.pga_job', [
         pgBrowser.Events.on(
           'pgadmin-browser:tree:selected',
           function(item, data) {
+            console.log("Socket connected :",self._socketConnected);
+            if(self._socketConnected){
+              console.log("Socket already connected");
+              return;
+            }
             console.log('Node selected, checking if it is a pgAgent collection', data ? data._type : 'no data');
             // Check if the selected node is a pgagent collection or individual job
             if (data && (data._type === 'coll-pga_job' || data._type === 'pga_job')) {
@@ -255,6 +261,7 @@ define('pgadmin.node.pga_job', [
                 // Connect to socket and start listening for job status updates
                 console.log('Connecting to socket for server:', serverData.name || serverData._id);
                 self.connectJobStatusSocket(serverData._id);
+                self._socketConnected = true ;
               }
             }
           }
@@ -680,6 +687,7 @@ define('pgadmin.node.pga_job', [
             
             // Disconnect the socket
             self.socket.disconnect();
+            self._socketConnected = false;
             console.log('[pgAgent] Socket disconnected');
           }
           
