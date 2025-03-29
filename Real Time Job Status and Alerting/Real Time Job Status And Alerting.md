@@ -127,6 +127,11 @@ void SendEmail(const std::string &subject, const std::string &body) { ... }
 ### Example of an email notification received on failure
 ![alert mail example](./images/pgagent%20alert%20mail.png)
 
+### Working Demo
+
+![Demo](./preview/rtjs2.gif)
+
+
 ---
 
 ## Implementation Details
