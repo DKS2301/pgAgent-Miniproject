@@ -129,7 +129,7 @@ void SendEmail(const std::string &subject, const std::string &body) { ... }
 
 ### Working Demo
 
-![Demo](./preview/rtjs2.gif)
+https://github.com/user-attachments/assets/8e1b8f3f-a02e-44dc-865c-1b12ed9ec169
 
 
 ---
@@ -187,8 +187,8 @@ setupJobStatusListener: function() {
 
 ## ✅ Usage
 
-1. Navigate to **pgAgent Jobs** in pgAdmin
-2. Select the target server
+1. Select the target server
+2. Navigate to **pgAgent Jobs** in pgAdmin
 3. **Job Status Monitoring** auto-starts
 4. Status updates appear without page reload
 
