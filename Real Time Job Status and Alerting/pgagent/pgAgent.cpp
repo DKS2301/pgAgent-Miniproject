@@ -153,7 +153,7 @@ void PollForJobStatus(DBconn *conn)
 
             LogMessage("Job " + jobid + " status: " + status + " at " + timestamp, LOG_INFO);
 
-            if (status == "Failure")
+            if (status == "f")
             {
                 emailBuffer.emplace_back("Job " + jobid +"\nAt " + timestamp+"\n\n");
 				CheckAndSendEmail();
@@ -212,7 +212,7 @@ int MainRestartLoop(DBconn *serviceConn)
 			//************************** Send NOTIFY when job is aborted *****************************
 			"WITH job_data AS ("
 			"  SELECT jlgjobid AS job_id, "
-			"         'Failure: orphaned job aborted' AS status, "
+			"         'f' AS status, "
 			"         now() AS timestamp "
 			"  FROM pgagent.pga_joblog "
 			"  WHERE jlgstatus = 'd' "

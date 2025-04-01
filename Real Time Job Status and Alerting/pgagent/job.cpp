@@ -130,7 +130,7 @@ int Job::Execute()
 	{
 		LogMessage("No steps found for jobid " + m_jobid, LOG_WARNING);
 		m_status = "i";
-		NotifyJobStatus(m_jobid, "Failure", "StepError: No steps found");
+		NotifyJobStatus(m_jobid, "f", "StepError: No steps found");
 		return -1;
 	}
 
@@ -168,7 +168,7 @@ int Job::Execute()
 		{
 			LogMessage("Value of rc is " + std::to_string(rc) + " for job " + m_jobid, LOG_WARNING);
 			m_status = "i";
-			NotifyJobStatus(m_jobid,"failure",	"No steps found for jobid ");
+			NotifyJobStatus(m_jobid,"f","No steps found for jobid ");
 			return -1;
 		}
 
@@ -431,7 +431,7 @@ int Job::Execute()
 				output = "Invalid step type!";
 				LogMessage("Invalid step type!", LOG_WARNING);
 				m_status = "i";
-				NotifyJobStatus(m_jobid,"Failure","internal Error :Invalid step type!");
+				NotifyJobStatus(m_jobid,"f","internal Error :Invalid step type!");
 				return -1;
 			}
 		}
@@ -456,14 +456,14 @@ int Job::Execute()
 			std::replace(failureMessage.begin(), failureMessage.end(), '"', ' '); // Replace " with '
 			std::replace(failureMessage.begin(), failureMessage.end(), '\n', ' '); // Replace " with '
 
-            NotifyJobStatus(m_jobid, "Failure",failureMessage);
+            NotifyJobStatus(m_jobid, "f",failureMessage);
 			return -1;
 		}
 		steps->MoveNext();
 	}
 
 	m_status = "s";
-	NotifyJobStatus(m_jobid, "success","");
+	NotifyJobStatus(m_jobid, "s","");
 	return 0;
 }
 
@@ -506,7 +506,7 @@ void JobThread::operator()()
 				"VALUES (nextval('pgagent.pga_joblog_jlgid_seq'), " +
 				m_jobid + ", 'i')"
 			);
-            NotifyJobStatus(m_jobid, "Failure","internal error:Failed to launch the thread.");
+            NotifyJobStatus(m_jobid, "f","internal error:Failed to launch the thread.");
 			if (res)
 				res = NULL;
 		}

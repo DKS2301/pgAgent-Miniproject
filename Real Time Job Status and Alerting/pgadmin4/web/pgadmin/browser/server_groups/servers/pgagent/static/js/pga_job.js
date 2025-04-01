@@ -472,14 +472,14 @@ define('pgadmin.node.pga_job', [
                 console.log('📢[pgAdmin pgAgent] Processing job update for server:', serverId,
                            'job:', jobId,
                            'status:', statusData || 'unknown');
-                if (statusData === 'success'||statusData === 'Failure'){
+                if (statusData === 's'||statusData === 'f'){
                       // Call the refreshJobNode method with proper error handling
                       if (jobId) {
                         console.log('📢[pgAdmin pgAgent] Refreshing job node for server:', serverId, 'and job:', jobId);
-                        if(statusData === 'success'){
+                        if(statusData === 's'){
                           pgAdmin.Browser.notifier.success(gettext('Job ' + jobId + ' on server: ' + serverId+' updated with status: '+statusData));
                         }
-                        else if(statusData === 'failed'){
+                        else if(statusData === 'f'){
                           pgAdmin.Browser.notifier.error(gettext('Job ' + jobId + ' on server: ' + serverId+' updated with status: '+statusData));
                         }
                         self.refreshJobNode(serverId, jobId);
