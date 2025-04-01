@@ -1,7 +1,7 @@
 
 ---
 
-#  Real-Time Job Status Update Implementation in pgAdmin
+#  Real-Time Job Status Update Implementation in pgAdmin4
 
 ---
 
