@@ -1,0 +1,23 @@
+.idea
+CMakeCache.txt
+CMakeFiles/
+CPackConfig.cmake
+CPackSourceConfig.cmake
+/Makefile
+cmake_install.cmake
+install_manifest.txt
+# Ignore 'pgagent' & 'pgagent.control' in root directory only.
+/pgagent
+!/*/pgagent
+/pgagent.control
+!/*/pgagent.control
+*.log
+# Ignore '*.sql' files in root directory only.
+/*.sql
+!/*/*.sql
+/results/init.out
+/results/job.out
+/regression.diffs
+/regression.out
+/pgagent.out
+.cmake

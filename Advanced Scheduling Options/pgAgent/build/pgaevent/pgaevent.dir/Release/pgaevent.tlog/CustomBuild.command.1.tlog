@@ -1,0 +1,10 @@
+^C:\USERS\MUHZ3\DESKTOP\MINI-PROJECT\PGAGENT\PGAEVENT\CMAKELISTS.TXT
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SC:/Users/muhz3/Desktop/mini-project/pgAgent -BC:/Users/muhz3/Desktop/mini-project/pgAgent/build --check-stamp-file C:/Users/muhz3/Desktop/mini-project/pgAgent/build/pgaevent/CMakeFiles/generate.stamp
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

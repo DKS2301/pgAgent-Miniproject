@@ -1,0 +1,7 @@
+# pgagent extension
+comment = 'A PostgreSQL job scheduler'
+default_version = '4.2'
+relocatable = false
+superuser = false
+schema = pgagent
+
