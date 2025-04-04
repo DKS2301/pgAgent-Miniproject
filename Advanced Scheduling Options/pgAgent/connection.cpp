@@ -11,7 +11,9 @@
 
 #include "pgAgent.h"
 #include <string>
-
+#include <curl/curl.h>
+#include <sstream>
+#include <iostream>
 namespace ip = boost::asio::ip;
 
 DBconn   *DBconn::ms_primaryConn = NULL;
@@ -526,3 +528,4 @@ const std::string CONNinfo::Get(const std::string &dbName) const
 		m_connStr + " dbname=" + "" + (dbName.empty() ? m_dbName : dbName)
 	);
 }
+

@@ -10,8 +10,14 @@
 //////////////////////////////////////////////////////////////////////////
 
 #include "pgAgent.h"
-
+#include "notification.h"
 #include <sys/types.h>
+#include <sstream>
+#include <iostream>
+#include <curl/curl.h>
+#include <sstream>
+#include <nlohmann/json.hpp>  
+using json = nlohmann::json;
 
 #if !BOOST_OS_WINDOWS
 #include <errno.h>
@@ -24,8 +30,9 @@ Job::Job(DBconn *conn, const std::string &jid)
 	m_threadConn = conn;
 	m_jobid = jid;
 	m_status = "";
-
 	LogMessage("Starting job: " + m_jobid, LOG_DEBUG);
+	NotifyJobStatus(m_jobid, "starting","");
+
 
 	int rc = m_threadConn->ExecuteVoid(
 		"UPDATE pgagent.pga_job SET jobagentid=" + backendPid +
@@ -34,6 +41,7 @@ Job::Job(DBconn *conn, const std::string &jid)
 
 	if (rc == 1)
 	{
+		
 		DBresultPtr id = m_threadConn->Execute(
 			"SELECT nextval('pgagent.pga_joblog_jlgid_seq') AS id"
 		);
@@ -47,6 +55,8 @@ Job::Job(DBconn *conn, const std::string &jid)
 			if (res)
 			{
 				m_status = "r";
+				NotifyJobStatus(m_jobid, "running","");
+
 			}
 		}
 	}
@@ -70,6 +80,8 @@ Job::~Job()
 	m_threadConn->Return();
 
 	LogMessage("Completed job: " + m_jobid, LOG_DEBUG);
+	NotifyJobStatus(m_jobid, "completed","");
+
 }
 
 
@@ -88,6 +100,7 @@ int Job::Execute()
 	{
 		LogMessage("No steps found for jobid " + m_jobid, LOG_WARNING);
 		m_status = "i";
+		NotifyJobStatus(m_jobid, "f", "StepError: No steps found");
 		return -1;
 	}
 
@@ -95,7 +108,8 @@ int Job::Execute()
 	{
 		DBconn      *stepConn = nullptr;
 		std::string  jslid, stepid, jpecode, output;
-
+		std::string failureMessage;
+        NotifyJobStatus(m_jobid + ":" + stepid, "running","");
 		stepid = steps->GetString("jstid");
 
 		DBresultPtr id = m_threadConn->Execute(
@@ -109,6 +123,7 @@ int Job::Execute()
 				"INSERT INTO pgagent.pga_jobsteplog(jslid, jsljlgid, jsljstid, jslstatus) "
 				"SELECT " + jslid + ", " + m_logid + ", " + stepid + ", 'r'" +
 				"  FROM pgagent.pga_jobstep WHERE jstid=" + stepid);
+			NotifyJobStatus(m_jobid,"started","JobStep " + stepid + " started for Job ");
 
 			if (res)
 			{
@@ -123,6 +138,7 @@ int Job::Execute()
 		{
 			LogMessage("Value of rc is " + std::to_string(rc) + " for job " + m_jobid, LOG_WARNING);
 			m_status = "i";
+			NotifyJobStatus(m_jobid,"f","No steps found for jobid ");
 			return -1;
 		}
 
@@ -264,6 +280,7 @@ int Job::Execute()
 					LogMessage((boost::format(
 						"Couldn't execute script: %s, GetLastError() returned %d, errno = %d"
 					) % filename.c_str() % GetLastError() % errno).str(), LOG_WARNING);
+					N
 					CloseHandle(h_process);
 					rc = -1;
 
@@ -384,15 +401,15 @@ int Job::Execute()
 				output = "Invalid step type!";
 				LogMessage("Invalid step type!", LOG_WARNING);
 				m_status = "i";
+				NotifyJobStatus(m_jobid,"f","internal Error :Invalid step type!");
 				return -1;
 			}
 		}
 
 		std::string stepstatus;
-		if (succeeded)
+		if (succeeded){
 			stepstatus = "s";
-		else
-			stepstatus = steps->GetString("jstonerror");
+		}
 
 		rc = m_threadConn->ExecuteVoid(
 			"UPDATE pgagent.pga_jobsteplog "
@@ -400,15 +417,23 @@ int Job::Execute()
 			"       jslresult = " + NumToStr(rc) + ", jslstatus = '" + stepstatus + "', " +
 			"       jsloutput = " + m_threadConn->qtDbString(output) + " " +
 			" WHERE jslid=" + jslid);
-		if (rc != 1 || stepstatus == "f")
+
+		if (rc != 1 || stepstatus != "s")
 		{
 			m_status = "f";
+			stepstatus = steps->GetString("jstonerror");
+			failureMessage = "Failed at step " + stepid +" "+ output+stepstatus;
+			std::replace(failureMessage.begin(), failureMessage.end(), '"', ' '); // Replace " with '
+			std::replace(failureMessage.begin(), failureMessage.end(), '\n', ' '); // Replace " with '
+
+            NotifyJobStatus(m_jobid, "f",failureMessage);
 			return -1;
 		}
 		steps->MoveNext();
 	}
 
 	m_status = "s";
+	NotifyJobStatus(m_jobid, "s","");
 	return 0;
 }
 
@@ -432,6 +457,9 @@ void JobThread::operator()()
 
 	if (threadConn)
 	{
+        // Check for pending email notifications before starting the job
+        CheckPendingEmailNotifications();
+        
 		Job job(threadConn, m_jobid);
 
 		if (job.Runnable())
@@ -451,8 +479,13 @@ void JobThread::operator()()
 				"VALUES (nextval('pgagent.pga_joblog_jlgid_seq'), " +
 				m_jobid + ", 'i')"
 			);
+            NotifyJobStatus(m_jobid, "f","internal error:Failed to launch the thread.");
 			if (res)
 				res = NULL;
 		}
+
+        // Check for pending email notifications after job completion
+        CheckPendingEmailNotifications();
 	}
 }
+
