@@ -17,8 +17,7 @@ import { io as socket_io } from 'socket.io-client';
 
 /* 
  * SOCKET.IO IMPROVEMENTS - JOB STATUS LISTENER
- *  
- */
+*/
 
 define('pgadmin.node.pga_job', [
   'sources/gettext', 'sources/url_for', 'pgadmin.browser',
@@ -458,6 +457,8 @@ define('pgadmin.node.pga_job', [
                 let statusData = data.status;
                 let jobId = data.job_id;
                 let serverId = data.sid;
+                let notification = data.notification || { browser: true };
+                let customText = data.custom_text || '';
                 
                 if (!statusData) {
                   console.error('📢[pgAdmin pgAgent] Invalid job status update - missing status data');
@@ -471,29 +472,49 @@ define('pgadmin.node.pga_job', [
                 // Log the notification details
                 console.log('📢[pgAdmin pgAgent] Processing job update for server:', serverId,
                            'job:', jobId,
-                           'status:', statusData || 'unknown');
-                if (statusData === 's'||statusData === 'f'){
-                      // Call the refreshJobNode method with proper error handling
-                      if (jobId) {
+                           'status:', statusData || 'unknown',
+                           'browser notification:', notification.browser);
+                           
+                // Only show browser notifications if enabled in notification settings
+                if (notification.browser && (statusData === 's' || statusData === 'f')){
+                    // Call the refreshJobNode method with proper error handling
+                    if (jobId) {
                         console.log('📢[pgAdmin pgAgent] Refreshing job node for server:', serverId, 'and job:', jobId);
+                        
+                        // Create appropriate notification message
+                        let notificationMessage = '';
                         if(statusData === 's'){
-                          pgAdmin.Browser.notifier.success(gettext('Job ' + jobId + ' on server: ' + serverId+' updated with status: '+statusData));
+                            notificationMessage = gettext('Job ' + jobId + ' completed successfully');
+                            if (customText) {
+                                notificationMessage += ': ' + customText;
+                            }
+                            pgAdmin.Browser.notifier.success(notificationMessage);
                         }
                         else if(statusData === 'f'){
-                          pgAdmin.Browser.notifier.error(gettext('Job ' + jobId + ' on server: ' + serverId+' updated with status: '+statusData));
+                            notificationMessage = gettext('Job ' + jobId + ' failed');
+                            if (customText) {
+                                notificationMessage += ': ' + customText;
+                            }
+                            pgAdmin.Browser.notifier.error(notificationMessage);
                         }
+                        
                         self.refreshJobNode(serverId, jobId);
-                        console.log('📢[pgAdmin pgAgent] Refreshed job node for server:', serverId, 'and job:', jobId,"status:",statusData);
-                  } else {
-                    console.warn('📢[pgAdmin pgAgent] Job ID missing in update, refreshing all jobs');
-                    self.refreshJobs(serverId);
-                  }
+                        console.log('📢[pgAdmin pgAgent] Refreshed job node for server:', serverId, 'and job:', jobId, "status:", statusData);
+                    } else {
+                        console.warn('📢[pgAdmin pgAgent] Job ID missing in update, refreshing all jobs');
+                        self.refreshJobs(serverId);
+                    }
+                } else {
+                    console.log('📢[pgAdmin pgAgent] Browser notifications disabled for this job or status not reportable');
+                    // Still refresh the job node even if notifications are disabled
+                    if (jobId) {
+                        self.refreshJobNode(serverId, jobId);
+                    }
                 }
               }
               catch (e) {
                 console.error('📢[pgAdmin pgAgent] Error processing job status update:', e);
                 console.error('📢[pgAdmin pgAgent] Update data:', data);
-                
               }
             });
             

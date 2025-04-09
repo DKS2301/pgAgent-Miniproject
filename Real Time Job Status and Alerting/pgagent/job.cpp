@@ -87,22 +87,23 @@ Job::~Job()
 
 int Job::Execute()
 {
-	int rc = 0;
-	bool succeeded = false;
+	LogMessage("Executing job: " + m_jobid, LOG_DEBUG);
+
+	// Get the details of the steps to be executed
 	DBresultPtr steps = m_threadConn->Execute(
-		"SELECT * "
-		"  FROM pgagent.pga_jobstep "
-		" WHERE jstenabled "
-		"   AND jstjobid=" + m_jobid +
-		" ORDER BY jstname, jstid");
+		"SELECT * FROM pgagent.pga_jobstep WHERE jstjobid=" + m_jobid + " ORDER BY jstid");
 
 	if (!steps)
 	{
-		LogMessage("No steps found for jobid " + m_jobid, LOG_WARNING);
-		m_status = "i";
-		NotifyJobStatus(m_jobid, "f", "StepError: No steps found");
-		return -1;
+		// Failed to get the steps
+		LogMessage("Failed to get steps for job " + m_jobid, LOG_WARNING);
+		m_status = "f";
+		NotifyJobStatus(m_jobid, "f","Failed to get steps for job");
+		return 1;
 	}
+
+	int rc = 0;
+	bool succeeded = false;
 
 	while (steps->HasData())
 	{

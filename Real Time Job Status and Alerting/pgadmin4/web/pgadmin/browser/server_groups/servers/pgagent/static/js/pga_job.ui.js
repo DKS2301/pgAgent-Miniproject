@@ -28,6 +28,15 @@ export default class PgaJobSchema extends BaseUISchema {
       jobdesc: '',
       jsteps: [],
       jschedules: [],
+      // Notification settings
+      jnenabled: true,
+      jnbrowser: true,
+      jnemail: false,
+      jnwhen: 'f',
+      jnmininterval: 0,
+      jnemailrecipients: '',
+      jncustomtext: '',
+      jnlastnotification: undefined,
       ...initValues,
     });
 
@@ -117,6 +126,76 @@ export default class PgaJobSchema extends BaseUISchema {
         schema: new PgaJobScheduleSchema(),
         canAdd: true, canDelete: true, canEdit: true,
         columns: ['jscname', 'jscenabled', 'jscstart', 'jscend'],
+      },{
+        id: 'jnenabled', label: gettext('Enable Notifications'), type: 'switch',
+        group: gettext('Notifications'),
+        mode: ['edit', 'create', 'properties'],
+        helpMessage: gettext('Enable or disable notifications for this job.'),
+      },{
+        id: 'jnbrowser', label: gettext('Browser Notifications'), type: 'switch',
+        group: gettext('Notifications'),
+        mode: ['edit', 'create', 'properties'],
+        helpMessage: gettext('Show notifications in the browser.'),
+        deps: ['jnenabled'],
+        disabled: function(state) {
+          return !state.jnenabled;
+        },
+      },{
+        id: 'jnemail', label: gettext('Email Notifications'), type: 'switch',
+        group: gettext('Notifications'),
+        mode: ['edit', 'create', 'properties'],
+        helpMessage: gettext('Send email notifications.'),
+        deps: ['jnenabled'],
+        disabled: function(state) {
+          return !state.jnenabled;
+        },
+      },{
+        id: 'jnwhen', label: gettext('Notify When'), type: 'select',
+        group: gettext('Notifications'),
+        mode: ['edit', 'create', 'properties'],
+        options: [
+          {label: gettext('On Failure'), value: 'f'},
+          {label: gettext('On Success'), value: 's'},
+          {label: gettext('Both'), value: 'b'},
+          {label: gettext('Always'), value: 'a'},
+        ],
+        helpMessage: gettext('When to send notifications.'),
+        deps: ['jnenabled'],
+        disabled: function(state) {
+          return !state.jnenabled;
+        },
+      },{
+        id: 'jnmininterval', label: gettext('Minimum Interval (seconds)'), type: 'int',
+        group: gettext('Notifications'),
+        mode: ['edit', 'create', 'properties'],
+        helpMessage: gettext('Minimum time between notifications in seconds.'),
+        deps: ['jnenabled'],
+        disabled: function(state) {
+          return !state.jnenabled;
+        },
+        min: 0,
+      },{
+        id: 'jnemailrecipients', label: gettext('Email Recipients'), type: 'text',
+        group: gettext('Notifications'),
+        mode: ['edit', 'create', 'properties'],
+        helpMessage: gettext('Comma-separated list of email recipients.'),
+        deps: ['jnenabled', 'jnemail'],
+        disabled: function(state) {
+          return !state.jnenabled || !state.jnemail;
+        },
+      },{
+        id: 'jncustomtext', label: gettext('Custom Message'), type: 'multiline',
+        group: gettext('Notifications'),
+        mode: ['edit', 'create', 'properties'],
+        helpMessage: gettext('Custom message to include in notifications.'),
+        deps: ['jnenabled'],
+        disabled: function(state) {
+          return !state.jnenabled;
+        },
+      },{
+        id: 'jnlastnotification', type: 'text', mode: ['properties'],
+        label: gettext('Last Notification'),
+        group: gettext('Notifications'),
       }
     ];
   }

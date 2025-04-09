@@ -20,12 +20,27 @@
 #define TIME_LIMIT_SEC 60  // Maximum time to wait before sending notifications
 #define MAX_EMAIL_RETRIES 3
 
+// Struct to hold job notification settings
+struct JobNotificationSettings {
+    std::string jobId;
+    bool enabled;
+    bool browser;
+    bool email;
+    std::string when;       // a=all, s=success, f=failure, b=both
+    int minInterval;        // minimum time between notifications in seconds
+    std::string emailRecipients;
+    std::string customText;
+    std::string lastNotification;
+};
+
 // Struct to hold failure information
 struct FailureInfo {
     std::string jobId;
     std::string timestamp;
     std::string description;
     std::string detailedLog;
+    std::string emailRecipients; // Custom email recipients for this job
+    std::string customText;      // Custom notification text for this job
 };
 
 // Email data structure
@@ -36,6 +51,11 @@ struct EmailData {
 // Main notification functions
 void NotifyJobStatus(const std::string& jobId, const std::string& status, const std::string& description);
 void CheckPendingEmailNotifications();
+
+// Job notification settings functions
+bool GetJobNotificationSettings(const std::string& jobId, JobNotificationSettings& settings);
+bool ShouldSendNotification(const JobNotificationSettings& settings, const std::string& status);
+void UpdateLastNotificationTime(const std::string& jobId);
 
 // Email sending functions
 void SendBufferedEmail();

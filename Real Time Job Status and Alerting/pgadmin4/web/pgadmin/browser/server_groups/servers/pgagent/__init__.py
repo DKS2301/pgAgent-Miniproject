@@ -1163,5 +1163,4 @@ SELECT EXISTS(
                 if not status:
                     internal_server_error(errormsg=res)
 
-
 JobView.register_node_view(blueprint)
