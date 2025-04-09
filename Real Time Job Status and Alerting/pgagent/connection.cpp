@@ -21,51 +21,6 @@ CONNinfo  DBconn::ms_basicConnInfo;
 
 static boost::mutex  s_poolLock;
 
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-//	Polling Service for Listening to Notifications
-///////////////////////////////////////////////////////////////////////////////////////////////////////////////
-std::string DBconn::GetLastNotification()
-{
-    return lastNotification;
-}
-
-bool DBconn::PollNotification()
-{
-    if (!m_conn)
-    {
-        LogMessage("PollNotification: Connection is NULL!", LOG_ERROR);
-        return false;
-    }
-
-    if (!PQconsumeInput(m_conn))
-    {
-        LogMessage("PollNotification: Failed to consume input", LOG_ERROR);
-        return false;
-    }
-
-    if (PQisBusy(m_conn))
-    {
-        LogMessage("PollNotification: Connection is busy", LOG_DEBUG);
-        return false;
-    }
-
-    PGnotify *notify = PQnotifies(m_conn);
-    if (notify)
-    {
-		lastNotification= notify->extra ? notify->extra : "(no payload)";
-        std::string notificationMessage = "🔔 PollNotification: Received [" + std::string(notify->relname) + "] -> Payload: " + lastNotification;
-        LogMessage(notificationMessage, LOG_DEBUG);
-        PQfreemem(notify);
-        return true;
-    }
-
-    LogMessage("PollNotification: No notifications", LOG_DEBUG);
-    return false;
-}
-
-//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-
 DBconn::DBconn(const std::string &connectString)
 : m_inUse(false), m_next(NULL), m_prev(NULL), m_minorVersion(0),
 	m_majorVersion(0)
@@ -89,8 +44,6 @@ bool DBconn::Connect(const std::string &connStr)
 
 		return false;
 	}
- 	LogMessage("Executing LISTEN pgagent pgagent_notify", LOG_DEBUG);
-    ExecuteVoid("LISTEN pgagent_notify;");
 
 	return (m_conn != NULL);
 }
@@ -575,3 +528,4 @@ const std::string CONNinfo::Get(const std::string &dbName) const
 		m_connStr + " dbname=" + "" + (dbName.empty() ? m_dbName : dbName)
 	);
 }
+
