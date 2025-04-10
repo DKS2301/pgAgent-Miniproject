@@ -58,6 +58,27 @@ joblastrun           timestamptz          NULL
 COMMENT ON TABLE pgagent.pga_job IS 'Job main entry';
 COMMENT ON COLUMN pgagent.pga_job.jobagentid IS 'Agent that currently executes this job.';
 
+-- Add notification settings table
+CREATE TABLE pgagent.pga_job_notification (
+jnid                 serial               NOT NULL PRIMARY KEY,
+jnjobid              int4                 NOT NULL REFERENCES pgagent.pga_job (jobid) ON DELETE CASCADE ON UPDATE RESTRICT,
+jnenabled            bool                 NOT NULL DEFAULT true,
+jnbrowser            bool                 NOT NULL DEFAULT true,
+jnemail              bool                 NOT NULL DEFAULT false,
+jnwhen               char                 NOT NULL CHECK (jnwhen IN ('a', 's', 'f', 'b')) DEFAULT 'f', -- a=all, s=success, f=failure, b=both (success and failure)
+jnmininterval        int4                 NOT NULL DEFAULT 0, -- minimum interval between notifications in seconds (0 = no limit)
+jnemailrecipients    text                 NOT NULL DEFAULT '', -- comma-separated list of email recipients
+jncustomtext         text                 NOT NULL DEFAULT '', -- custom text to include in notifications
+jnlastnotification   timestamptz          NULL    -- timestamp of last notification sent
+) WITHOUT OIDS;
+CREATE INDEX pga_job_notification_jobid ON pgagent.pga_job_notification(jnjobid);
+COMMENT ON TABLE pgagent.pga_job_notification IS 'Job notification settings';
+COMMENT ON COLUMN pgagent.pga_job_notification.jnwhen IS 'When to send notifications: a=all states, s=success only, f=failure only, b=both success and failure';
+
+-- For each existing job, create a default notification entry
+INSERT INTO pgagent.pga_job_notification (jnjobid, jnenabled, jnbrowser, jnemail, jnwhen)
+SELECT jobid, true, true, false, 'f' FROM pgagent.pga_job;
+
 
 
 CREATE TABLE pgagent.pga_jobstep (

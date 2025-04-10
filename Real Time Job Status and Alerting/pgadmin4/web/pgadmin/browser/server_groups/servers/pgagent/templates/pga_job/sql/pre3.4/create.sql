@@ -12,8 +12,28 @@ INSERT INTO pgagent.pga_job(
     jobjclid, jobname, jobdesc, jobhostagent, jobenabled
 ) VALUES (
     {{ data.jobjclid|qtLiteral(conn) }}::integer, {{ data.jobname|qtLiteral(conn) }}::text, {{ data.jobdesc|qtLiteral(conn) }}::text, {{ data.jobhostagent|qtLiteral(conn) }}::text, {% if data.jobenabled %}true{% else %}false{% endif %}
+) RETURNING jobid INTO jid;
 
-) RETURNING jobid INTO jid;{% if 'jsteps' in data and data.jsteps|length > 0 %}
+-- Add notification settings
+INSERT INTO pgagent.pga_job_notification (
+    jnjobid,
+    jnenabled,
+    jnbrowser,
+    jnemail,
+    jnwhen,
+    jnmininterval,
+    jnemailrecipients,
+    jncustomtext
+) VALUES (
+    jid,
+    {% if data.jnenabled is defined %}{{ data.jnenabled }}{% else %}true{% endif %},
+    {% if data.jnbrowser is defined %}{{ data.jnbrowser }}{% else %}true{% endif %},
+    {% if data.jnemail is defined %}{{ data.jnemail }}{% else %}false{% endif %},
+    {% if data.jnwhen is defined %}{{ data.jnwhen|qtLiteral(conn) }}{% else %}'f'{% endif %},
+    {% if data.jnmininterval is defined %}{{ data.jnmininterval }}{% else %}0{% endif %},
+    {% if data.jnemailrecipients is defined %}{{ data.jnemailrecipients|qtLiteral(conn) }}{% else %}''{% endif %},
+    {% if data.jncustomtext is defined %}{{ data.jncustomtext|qtLiteral(conn) }}{% else %}''{% endif %}
+);{% if 'jsteps' in data and data.jsteps|length > 0 %}
 
 
 -- Steps

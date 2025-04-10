@@ -10,50 +10,20 @@
 //////////////////////////////////////////////////////////////////////////
 
 #include "pgAgent.h"
+#include "notification.h"
 #include <sys/types.h>
 #include <sstream>
 #include <iostream>
+#include <curl/curl.h>
+#include <sstream>
+#include <nlohmann/json.hpp>  
+using json = nlohmann::json;
 
 #if !BOOST_OS_WINDOWS
 #include <errno.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
 #endif
-
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-//	Notification Service for internal job Failures
-///////////////////////////////////////////////////////////////////////////////////////////////////
-
-std::string GetCurrentTimestamp()
-{
-    auto now = std::chrono::system_clock::now();
-    std::time_t now_c = std::chrono::system_clock::to_time_t(now);
-    
-    char buffer[20];
-    std::strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", std::localtime(&now_c));
-
-    return std::string(buffer);
-}
-
-void NotifyJobStatus(const std::string &jobid, const std::string &status, const std::string &description)
-{
- 	std::string payload = "{\"job_id\": \"" + jobid + "\", \"status\": \"" + status + "\", \"description\": \"" + description + "\", \"timestamp\": \"" + GetCurrentTimestamp() + "\"}";
-
-    std::string query = "NOTIFY job_status_update, '" + payload + "'";
-	DBconn *notifyConn = DBconn::Get();
-    if (!notifyConn)  
-    {
-        LogMessage("NotifyJobStatus: Connection is NULL or not connected!", LOG_ERROR);
-        return;
-    }
-
-    LogMessage("Executing query: " + query, LOG_DEBUG);
-    notifyConn->ExecuteVoid(query);
-    notifyConn->Return();
-}
-
-//*******************************************************************************************
 
 Job::Job(DBconn *conn, const std::string &jid)
 {
@@ -117,22 +87,23 @@ Job::~Job()
 
 int Job::Execute()
 {
-	int rc = 0;
-	bool succeeded = false;
+	LogMessage("Executing job: " + m_jobid, LOG_DEBUG);
+
+	// Get the details of the steps to be executed
 	DBresultPtr steps = m_threadConn->Execute(
-		"SELECT * "
-		"  FROM pgagent.pga_jobstep "
-		" WHERE jstenabled "
-		"   AND jstjobid=" + m_jobid +
-		" ORDER BY jstname, jstid");
+		"SELECT * FROM pgagent.pga_jobstep WHERE jstjobid=" + m_jobid + " ORDER BY jstid");
 
 	if (!steps)
 	{
-		LogMessage("No steps found for jobid " + m_jobid, LOG_WARNING);
-		m_status = "i";
-		NotifyJobStatus(m_jobid, "f", "StepError: No steps found");
-		return -1;
+		// Failed to get the steps
+		LogMessage("Failed to get steps for job " + m_jobid, LOG_WARNING);
+		m_status = "f";
+		NotifyJobStatus(m_jobid, "f","Failed to get steps for job");
+		return 1;
 	}
+
+	int rc = 0;
+	bool succeeded = false;
 
 	while (steps->HasData())
 	{
@@ -487,6 +458,9 @@ void JobThread::operator()()
 
 	if (threadConn)
 	{
+        // Check for pending email notifications before starting the job
+        CheckPendingEmailNotifications();
+        
 		Job job(threadConn, m_jobid);
 
 		if (job.Runnable())
@@ -510,5 +484,9 @@ void JobThread::operator()()
 			if (res)
 				res = NULL;
 		}
+
+        // Check for pending email notifications after job completion
+        CheckPendingEmailNotifications();
 	}
 }
+

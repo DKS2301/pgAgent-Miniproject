@@ -10,6 +10,9 @@
 //////////////////////////////////////////////////////////////////////////
 
 #include "pgAgent.h"
+#include "notification.h" 
+#include <iostream>
+
 
 #if !BOOST_OS_WINDOWS
 #include <unistd.h>
@@ -36,8 +39,6 @@ void        Initialized();
 
 int MainRestartLoop(DBconn *serviceConn)
 {
-	// clean up old jobs
-
 	int rc;
 
 	LogMessage("Clearing zombies", LOG_DEBUG);
@@ -73,6 +74,17 @@ int MainRestartLoop(DBconn *serviceConn)
 			"SELECT jlgid "
 			"FROM pga_tmp_zombies z, pgagent.pga_job j, pgagent.pga_joblog l "
 			"WHERE z.jagpid=j.jobagentid AND j.jobid = l.jlgjobid AND l.jlgstatus='r');\n"
+			//************************** Send NOTIFY when job is aborted *****************************
+			"WITH job_data AS ("
+			"  SELECT jlgjobid AS job_id, "
+			"         'f' AS status, "
+			"         now() AS timestamp "
+			"  FROM pgagent.pga_joblog "
+			"  WHERE jlgstatus = 'd' "
+			"  LIMIT 1"
+			") "
+			"SELECT pg_notify('job_status_update', row_to_json(job_data)::text) FROM job_data;\n"
+
 
 			"UPDATE pgagent.pga_jobsteplog SET jslstatus='d' WHERE jslid IN ( "
 			"SELECT jslid "
@@ -104,6 +116,7 @@ int MainRestartLoop(DBconn *serviceConn)
 		bool foundJobToExecute = false;
 
 		LogMessage("Checking for jobs to run", LOG_DEBUG);
+		CheckPendingEmailNotifications();
 		DBresultPtr res = serviceConn->Execute(
 			"SELECT J.jobid "
 			"  FROM pgagent.pga_job J "
@@ -127,6 +140,7 @@ int MainRestartLoop(DBconn *serviceConn)
 			}
 			res = NULL;
 
+			CheckPendingEmailNotifications();
 			LogMessage("Sleeping...", LOG_DEBUG);
 			WaitAWhile();
 		}

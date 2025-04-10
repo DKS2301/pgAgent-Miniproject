@@ -78,17 +78,67 @@ This project enhances pgAgent's scheduling capabilities by adding support for co
 ### 2. Backend Implementation
 
 - Enhanced scheduling logic in `pga_next_schedule` function:
+
   ```sql
-  -- Finding current occurrence
-  occurrence := 0;
-  curr_date := date_trunc('MONTH', nextrun);
-  WHILE curr_date <= nextrun LOOP
-    IF date_part('DOW', curr_date) = date_part('DOW', nextrun) THEN
-      occurrence := occurrence + 1;
-    END IF;
-    curr_date := curr_date + INTERVAL '1 Day';
+  -- Check for occurrence
+  gotit := FALSE;
+  FOR i IN 1 .. 5 LOOP
+      IF jscoccurrence[i] = TRUE THEN
+          gotit := TRUE;
+          EXIT;
+      END IF;
   END LOOP;
+
+  IF gotit = TRUE THEN
+      -- finding current occurrence
+      occurrence := 0; -- Reset occurrence counter before calculation
+      curr_date := date_trunc(''MONTH'', nextrun);
+      WHILE curr_date <= nextrun LOOP
+          IF date_part(''DOW'', curr_date) = date_part(''DOW'', nextrun) THEN
+              occurrence := occurrence + 1;
+          END IF;
+          curr_date := curr_date + INTERVAL ''1 Day'';
+      END LOOP;
+      -- is it the correct occurrence?
+      IF jscoccurrence[occurrence] = TRUE THEN
+          -- Check for exceptions
+          SELECT INTO d jexid FROM pgagent.pga_exception WHERE jexscid = jscid AND ((jexdate = nextrun::date AND jextime = nextrun::time) OR (jexdate = nextrun::date AND jextime IS NULL) OR (jexdate IS NULL AND jextime = nextrun::time));
+          IF FOUND THEN
+              -- Nuts - found an exception. Increment the time and try again
+              runafter := nextrun + INTERVAL ''1 Minute'';
+              bingo := FALSE;
+              minutetweak := TRUE;
+              daytweak := FALSE;
+          ELSE
+              bingo := TRUE;
+          END IF;
+      ELSE
+          -- We''re on the wrong occurrence of week day - increment a day and try again.
+          runafter := nextrun + INTERVAL ''1 Day'';
+          bingo := FALSE;
+          minutetweak := FALSE;
+          daytweak := TRUE;
+      END IF;
+  ELSE
+      -- Check for exceptions
+      SELECT INTO d jexid FROM pgagent.pga_exception WHERE jexscid = jscid AND ((jexdate = nextrun::date AND jextime = nextrun::time) OR (jexdate = nextrun::date AND jextime IS NULL) OR (jexdate IS NULL AND jextime = nextrun::time));
+      IF FOUND THEN
+          -- Nuts - found an exception. Increment the time and try again
+          runafter := nextrun + INTERVAL ''1 Minute'';
+          bingo := FALSE;
+          minutetweak := TRUE;
+          daytweak := FALSE;
+      ELSE
+          bingo := TRUE;
+      END IF;
+  END IF;
   ```
+
+## Preview
+
+### Working Demo
+
+https://github.com/user-attachments/assets/22a5f704-c360-4b87-a31c-fc5434177ea0
 
 ## Usage Examples
 
