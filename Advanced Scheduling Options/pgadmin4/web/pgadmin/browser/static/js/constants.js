@@ -85,7 +85,7 @@ export const WEEKDAYS = [
     {label: gettext('2nd'),value: '2'},
     {label: gettext('3rd'),value: '3'}, 
     {label: gettext('4th'),value: '4'},
-    {label: gettext('last'),value: '5'},
+    {label: gettext('5th'),value: '5'},
   ],
   MONTHS = [
     {label: gettext('January'),value: '1'}, {label: gettext('February'),value: '2'},
