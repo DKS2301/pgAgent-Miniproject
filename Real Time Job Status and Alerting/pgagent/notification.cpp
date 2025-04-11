@@ -187,7 +187,6 @@ bool SendEmailWithAttachment(const std::string& subject, const std::string& body
     // Add all recipients to the curl recipient list
     struct curl_slist* recipientsList = nullptr;
     for (const auto& recipient : recipients) {
-        LogMessage("🔍Adding email recipient: " + recipient, LOG_DEBUG);
         recipientsList = curl_slist_append(recipientsList, recipient.c_str());
     }
 
@@ -247,7 +246,7 @@ bool SendEmailWithAttachment(const std::string& subject, const std::string& body
     bool success = (res == CURLE_OK);
 
     LogMessage(success ? "🔍HTML email sent successfully!" : "🔍HTML email sending failed", 
-               success ? LOG_INFO : LOG_WARNING);
+               success ? LOG_INFO : LOG_INFO);
 
     curl_slist_free_all(recipientsList);
     curl_easy_cleanup(curl);
@@ -467,7 +466,7 @@ void SendBufferedEmail() {
     
     if (!emailSent) {
         LogMessage("🔍Failed to send email notification after " + 
-                   std::to_string(MAX_EMAIL_RETRIES) + " attempts", LOG_ERROR);
+                   std::to_string(MAX_EMAIL_RETRIES) + " attempts", LOG_WARNING);
         
         // As a fallback, try to save the email content locally
         std::string fallbackFileName = "failed_email_" + GetFileTimestamp() + ".html";
@@ -595,7 +594,8 @@ bool GetJobNotificationSettings(const std::string& jobId, JobNotificationSetting
     }
     
     std::string query = "SELECT jnenabled, jnbrowser, jnemail, jnwhen, jnmininterval, jnemailrecipients, jncustomtext, jnlastnotification "
-                        "FROM pgagent.pga_job_notification WHERE jnjobid = " + jobId;
+                        "FROM pgagent.pga_job_notification WHERE jnjobid = " + jobId+";";
+    
     
     DBresultPtr res = conn->Execute(query);
     if (!res) {
@@ -606,7 +606,7 @@ bool GetJobNotificationSettings(const std::string& jobId, JobNotificationSetting
     
     // No notification settings found
     if (!res->HasData()) {
-        LogMessage("No notification settings found for job " + jobId + ", using defaults", LOG_DEBUG);
+        LogMessage("🔍DEBUG: No notification settings found for job " + jobId + ", using defaults", LOG_DEBUG);
         // Set default values for settings
         settings.enabled = true;
         settings.browser = true;
@@ -631,6 +631,12 @@ bool GetJobNotificationSettings(const std::string& jobId, JobNotificationSetting
     settings.customText = res->GetString("jncustomtext");
     settings.lastNotification = res->GetString("jnlastnotification");
     
+    LogMessage("🔍DEBUG: Retrieved settings for job " + jobId + 
+               ": enabled=" + std::string(settings.enabled?"true":"false") +
+               ", browser=" + std::string(settings.browser?"true":"false") +
+               ", email=" + std::string(settings.email?"true":"false") +
+               ", when=" + settings.when, LOG_DEBUG);
+    
     conn->Return();
     return true;
 }
@@ -639,17 +645,22 @@ bool GetJobNotificationSettings(const std::string& jobId, JobNotificationSetting
 bool ShouldSendNotification(const JobNotificationSettings& settings, const std::string& status) {
     // If notifications are disabled, don't send
     if (!settings.enabled) {
+        LogMessage("🔍DEBUG: Notification disabled for job " + settings.jobId, LOG_DEBUG);
         return false;
     }
     
     // Check notification timing criteria
     if (settings.when == "a") { // All states
+        LogMessage("🔍DEBUG: Sending notification for job " + settings.jobId + " (all states)", LOG_DEBUG);
         return true;
     } else if (settings.when == "s" && status == "s") { // Success only
+        LogMessage("🔍DEBUG: Sending notification for job " + settings.jobId + " (success)", LOG_DEBUG);
         return true;
     } else if (settings.when == "f" && status == "f") { // Failure only
+        LogMessage("🔍DEBUG: Sending notification for job " + settings.jobId + " (failure)", LOG_DEBUG);
         return true;
     } else if (settings.when == "b" && (status == "s" || status == "f")) { // Both success and failure
+        LogMessage("🔍DEBUG: Sending notification for job " + settings.jobId + " (both success and failure)", LOG_DEBUG);
         return true;
     }
     
@@ -664,7 +675,7 @@ bool ShouldSendNotification(const JobNotificationSettings& settings, const std::
             double secondsElapsed = std::difftime(currentTime, lastTime);
             
             if (secondsElapsed < settings.minInterval) {
-                LogMessage("🔍Not sending notification for job " + settings.jobId + 
+                LogMessage("🔍DEBUG: Not sending notification for job " + settings.jobId + 
                           " due to minimum interval, seconds elapsed: " + 
                           std::to_string(secondsElapsed) + ", required: " + 
                           std::to_string(settings.minInterval), LOG_DEBUG);
@@ -673,7 +684,9 @@ bool ShouldSendNotification(const JobNotificationSettings& settings, const std::
         }
     }
     
-    return true;
+    LogMessage("🔍DEBUG: Notification criteria not met for job " + settings.jobId + 
+               " (status=" + status + ", when=" + settings.when + ")", LOG_DEBUG);
+    return false;
 }
 
 // Update the timestamp of the last notification for a job
@@ -700,18 +713,24 @@ void NotifyJobStatus(const std::string& jobId, const std::string& status, const 
     settings.jobId = jobId;
     
     if (!GetJobNotificationSettings(jobId, settings)) {
-        LogMessage("🔍Could not get notification settings for job " + jobId + ", using default behavior", LOG_WARNING);
-        // Continue with default behavior if settings can't be retrieved
+        LogMessage("🔍Could not get notification settings for job " + jobId + ", using default behavior", LOG_DEBUG);
     }
-    
+    size_t pos = 0;
     // Create JSON payload
     std::string payload = "{\"job_id\": \"" + jobId + "\", \"status\": \"" + status + 
-                          "\", \"description\": \"" + description + 
+                        //   "\", \"description\": \"" + escapedDescription + 
                           "\", \"timestamp\": \"" + timestamp + "\"";
     
     // Add custom text if available
     if (!settings.customText.empty()) {
-        payload += ", \"custom_text\": \"" + std::string(settings.customText) + "\"";
+        std::string escapedCustomText = settings.customText;
+        // Escape special characters in custom text
+        pos = 0;
+        while ((pos = escapedCustomText.find("\"", pos)) != std::string::npos) {
+            escapedCustomText.replace(pos, 1, "\\\"");
+            pos += 2;
+        }
+        payload += ", \"custom_text\": \"" + escapedCustomText + "\"";
     }
     
     // Add notification settings to payload
@@ -720,7 +739,6 @@ void NotifyJobStatus(const std::string& jobId, const std::string& status, const 
     
     payload += "}";
     
-    // Always send database notification for real-time updates regardless of settings
     // This ensures the pgAdmin UI can still show real-time updates for jobs
     std::string query = "NOTIFY job_status_update, '" + payload + "'";
     DBconn* notifyConn = DBconn::Get();
@@ -729,9 +747,8 @@ void NotifyJobStatus(const std::string& jobId, const std::string& status, const 
         return;
     }
     
-    LogMessage("🔍Executing query: " + query, LOG_DEBUG);
     notifyConn->ExecuteVoid(query);
-    LogMessage("🔍Job " + jobId + " status updated to " + status, LOG_DEBUG);
+    LogMessage("🔍DEBUG: Job " + jobId + " status updated to " + status, LOG_DEBUG);
     
     // Check if we should process this notification based on settings
     if (ShouldSendNotification(settings, status)) {
@@ -740,7 +757,7 @@ void NotifyJobStatus(const std::string& jobId, const std::string& status, const 
         
         // If job failed and email notifications are enabled, collect logs and add to buffer
         if (status == "f" && settings.email) {
-            LogMessage("🔍Job " + jobId + " failed, collecting detailed logs...", LOG_DEBUG);
+            LogMessage("🔍DEBUG: Job " + jobId + " failed, collecting detailed logs...", LOG_DEBUG);
             
             // Collect detailed logs
             std::string detailedLog = CollectDetailedLogs(jobId);
@@ -768,14 +785,13 @@ void NotifyJobStatus(const std::string& jobId, const std::string& status, const 
             if (!timerStarted) {
                 firstFailureTime = std::chrono::steady_clock::now();
                 timerStarted = true;
-                LogMessage("🔍Started failure batch timer", LOG_DEBUG);
             }
             
             // Check if it's time to send the email
             CheckPendingEmailNotifications();
         }
     } else {
-        LogMessage("🔍Notification skipped for job " + jobId + " based on notification settings", LOG_DEBUG);
+        LogMessage("🔍DEBUG: Notification skipped for job " + jobId + " based on notification settings", LOG_DEBUG);
     }
     
     notifyConn->Return();

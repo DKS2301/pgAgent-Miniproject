@@ -87,23 +87,22 @@ Job::~Job()
 
 int Job::Execute()
 {
-	LogMessage("Executing job: " + m_jobid, LOG_DEBUG);
-
-	// Get the details of the steps to be executed
+	int rc = 0;
+	bool succeeded = false;
 	DBresultPtr steps = m_threadConn->Execute(
-		"SELECT * FROM pgagent.pga_jobstep WHERE jstjobid=" + m_jobid + " ORDER BY jstid");
+		"SELECT * "
+		"  FROM pgagent.pga_jobstep "
+		" WHERE jstenabled "
+		"   AND jstjobid=" + m_jobid +
+		" ORDER BY jstname, jstid");
 
 	if (!steps)
 	{
-		// Failed to get the steps
-		LogMessage("Failed to get steps for job " + m_jobid, LOG_WARNING);
-		m_status = "f";
-		NotifyJobStatus(m_jobid, "f","Failed to get steps for job");
-		return 1;
+		LogMessage("🔍DEBUG: No steps found for jobid " + m_jobid + ", sending failure notification", LOG_DEBUG);
+		m_status = "i";
+		NotifyJobStatus(m_jobid, "f", "StepError: No steps found");
+		return -1;
 	}
-
-	int rc = 0;
-	bool succeeded = false;
 
 	while (steps->HasData())
 	{
@@ -421,13 +420,14 @@ int Job::Execute()
 
 		if (rc != 1 || stepstatus != "s")
 		{
+			LogMessage("🔍DEBUG: Step failed for jobid " + m_jobid + ", sending failure notification", LOG_DEBUG);
 			m_status = "f";
 			stepstatus = steps->GetString("jstonerror");
 			failureMessage = "Failed at step " + stepid +" "+ output+stepstatus;
 			std::replace(failureMessage.begin(), failureMessage.end(), '"', ' '); // Replace " with '
 			std::replace(failureMessage.begin(), failureMessage.end(), '\n', ' '); // Replace " with '
-
-            NotifyJobStatus(m_jobid, "f",failureMessage);
+			LogMessage("🔍DEBUG: Failure message: " + failureMessage, LOG_DEBUG);
+			NotifyJobStatus(m_jobid, "f", failureMessage);
 			return -1;
 		}
 		steps->MoveNext();
@@ -481,6 +481,7 @@ void JobThread::operator()()
 				m_jobid + ", 'i')"
 			);
             NotifyJobStatus(m_jobid, "f","internal error:Failed to launch the thread.");
+            LogMessage("🔍DEBUG: Internal error notification sent for jobid " + m_jobid, LOG_DEBUG);
 			if (res)
 				res = NULL;
 		}
