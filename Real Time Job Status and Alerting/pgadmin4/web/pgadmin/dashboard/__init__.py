@@ -252,6 +252,9 @@ class DashboardModule(PgAdminModule):
             'dashboard.system_statistics_did',
             'dashboard.replication_slots',
             'dashboard.replication_stats',
+            'dashboard.job_monitor',
+            'dashboard.run_job',
+            'dashboard.job_log'
         ] + pgd_replication.get_exposed_url_endpoints()
 
 
@@ -799,3 +802,344 @@ def replication_slots(sid=None):
         response=res['rows'],
         status=200
     )
+
+
+@blueprint.route('/job_monitor/<int:sid>', endpoint='job_monitor')
+@pga_login_required
+@check_precondition
+def job_monitor(sid=None):
+    """
+    This function returns job monitor data
+    :param sid: server id
+    :return: Response
+    """
+    try:
+        # Check if pgAgent extension is available
+        status, res = g.conn.execute_scalar(
+            "SELECT COUNT(*) FROM pg_catalog.pg_namespace WHERE nspname = 'pgagent'"
+        )
+        
+        if not status or int(res) == 0:
+            return make_json_response(
+                success=0,
+                errormsg=gettext("pgAgent extension not found. Please make sure it is installed."),
+                status=404
+            )
+            
+        # Debug: Let's check if the tables exist
+        status, tables = g.conn.execute_dict(
+            "SELECT table_name FROM information_schema.tables WHERE table_schema = 'pgagent'"
+        )
+        
+        if not status or len(tables['rows']) == 0:
+            return make_json_response(
+                success=0,
+                errormsg=gettext("pgAgent tables not found. Please make sure pgAgent is properly installed."),
+                status=404
+            )
+        
+        # Get table structure for debugging
+        table_info = {}
+        for table in tables['rows']:
+            table_name = table['table_name']
+            status, columns = g.conn.execute_dict(
+                "SELECT column_name, data_type FROM information_schema.columns "
+                "WHERE table_schema = 'pgagent' AND table_name = %s",
+                (table_name,)
+            )
+            if status:
+                table_info[table_name] = columns['rows']
+        
+        # Try a simpler query first to test
+        status, job_count = g.conn.execute_scalar(
+            "SELECT COUNT(*) FROM pgagent.pga_job"
+        )
+        
+        if not status:
+            return make_json_response(
+                success=0,
+                errormsg=gettext("Error accessing pgAgent job table: {}".format(job_count)),
+                status=500
+            )
+            
+        # If we got here, we can try the full query
+        status, res = g.conn.execute_dict(
+            render_template(
+                "/".join([g.template_path, 'job_monitor.sql'])
+            )
+        )
+
+        if not status:
+            return make_json_response(
+                success=0,
+                errormsg=gettext("Error executing job monitor query: {}".format(res)),
+                status=500
+            )
+            
+        # Log the structure of the result for debugging
+        if 'rows' in res and len(res['rows']) > 0:
+            first_row = res['rows'][0]
+            # Check if the result column exists
+            if 'result' in first_row:
+                # Extract the result JSON
+                result_json = first_row['result']
+                
+                # Check if result_json is a string and try to parse it
+                if isinstance(result_json, str):
+                    try:
+                        import json
+                        result_json = json.loads(result_json)
+                    except Exception as e:
+                        return make_json_response(
+                            success=0,
+                            errormsg=gettext("Error parsing JSON result: {}".format(str(e))),
+                            status=500
+                        )
+                
+                # Return the result directly
+                return ajax_response(
+                    response={
+                        'debug_info': {
+                            'tables': tables['rows'],
+                            'table_info': table_info,
+                            'job_count': job_count,
+                            'raw_result': first_row
+                        },
+                        'data': result_json
+                    },
+                    status=200
+                )
+            else:
+                # Log the available columns
+                available_columns = list(first_row.keys())
+                return make_json_response(
+                    success=0,
+                    errormsg=gettext("Expected 'result' column not found in query result. Available columns: {}".format(available_columns)),
+                    status=500
+                )
+        else:
+            # No rows returned
+            return ajax_response(
+                response={
+                    'debug_info': {
+                        'tables': tables['rows'],
+                        'table_info': table_info,
+                        'job_count': job_count,
+                        'message': 'No rows returned from query'
+                    },
+                    'data': {
+                        'summary': {
+                            'total_jobs': 0,
+                            'enabled_jobs': 0,
+                            'disabled_jobs': 0,
+                            'running_jobs': 0,
+                            'successful_jobs': 0,
+                            'failed_jobs': 0
+                        },
+                        'jobs': []
+                    }
+                },
+                status=200
+            )
+    except Exception as e:
+        import traceback
+        error_traceback = traceback.format_exc()
+        return make_json_response(
+            success=0,
+            errormsg=str(e),
+            info=error_traceback,
+            status=500
+        )
+
+
+@blueprint.route('/run_job/<int:sid>/<int:jobid>', methods=['POST'], endpoint='run_job')
+@pga_login_required
+@check_precondition
+def run_job(sid=None, jobid=None):
+    """
+    This function runs a specific pgAgent job
+    :param sid: server id
+    :param jobid: job id
+    :return: Response
+    """
+    try:
+        if jobid is None:
+            return make_json_response(
+                success=0,
+                errormsg=gettext("Job ID not specified"),
+                status=400
+            )
+
+        # Check if pgAgent extension is available
+        status, res = g.conn.execute_scalar(
+            "SELECT COUNT(*) FROM pg_catalog.pg_namespace WHERE nspname = 'pgagent'"
+        )
+        
+        if not status or int(res) == 0:
+            return make_json_response(
+                success=0,
+                errormsg=gettext("pgAgent extension not found. Please make sure it is installed."),
+                status=404
+            )
+        
+        # Check if the job exists
+        status, job_exists = g.conn.execute_scalar(
+            "SELECT COUNT(*) FROM pgagent.pga_job WHERE jobid = %s",
+            (jobid,)
+        )
+        
+        if not status or int(job_exists) == 0:
+            return make_json_response(
+                success=0,
+                errormsg=gettext("Job with ID {} not found".format(jobid)),
+                status=404
+            )
+            
+        # Run the job by calling pgagent function
+        status, res = g.conn.execute_scalar(
+            "SELECT pgagent.pga_run_job(%s)",
+            (jobid,)
+        )
+        
+        if not status:
+            return make_json_response(
+                success=0,
+                errormsg=gettext("Error running job: {}".format(res)),
+                status=500
+            )
+            
+        return make_json_response(
+            success=1,
+            info=gettext("Job started successfully"),
+            data={'jobid': jobid}
+        )
+        
+    except Exception as e:
+        import traceback
+        error_traceback = traceback.format_exc()
+        return make_json_response(
+            success=0,
+            errormsg=str(e),
+            info=error_traceback,
+            status=500
+        )
+
+
+@blueprint.route('/job_log/<int:sid>/<int:jobid>', methods=['GET'], endpoint='job_log')
+@pga_login_required
+@check_precondition
+def job_log(sid=None, jobid=None):
+    """
+    This function returns the log for a specific pgAgent job
+    :param sid: server id
+    :param jobid: job id
+    :return: Response
+    """
+    try:
+        if jobid is None:
+            return make_json_response(
+                success=0,
+                errormsg=gettext("Job ID not specified"),
+                status=400
+            )
+
+        # Check if pgAgent extension is available
+        status, res = g.conn.execute_scalar(
+            "SELECT COUNT(*) FROM pg_catalog.pg_namespace WHERE nspname = 'pgagent'"
+        )
+        
+        if not status or int(res) == 0:
+            return make_json_response(
+                success=0,
+                errormsg=gettext("pgAgent extension not found. Please make sure it is installed."),
+                status=404
+            )
+        
+        # Check if the job exists
+        status, job_exists = g.conn.execute_scalar(
+            "SELECT COUNT(*) FROM pgagent.pga_job WHERE jobid = %s",
+            (jobid,)
+        )
+        
+        if not status or int(job_exists) == 0:
+            return make_json_response(
+                success=0,
+                errormsg=gettext("Job with ID {} not found".format(jobid)),
+                status=404
+            )
+            
+        # Get job log details
+        status, job_log = g.conn.execute_dict(
+            """
+            SELECT 
+                j.jobname, 
+                jl.jlgid, 
+                jl.jlgjobid,
+                CASE 
+                    WHEN jl.jlgstatus = 'r' THEN 'Running'
+                    WHEN jl.jlgstatus = 's' THEN 'Success'
+                    WHEN jl.jlgstatus = 'f' THEN 'Failed'
+                    WHEN jl.jlgstatus = 'i' THEN 'Internal Error'
+                    WHEN jl.jlgstatus = 'd' THEN 'Aborted'
+                    ELSE jl.jlgstatus
+                END AS status,
+                jl.jlgstart,
+                jl.jlgduration,
+                array_agg(
+                    json_build_object(
+                        'step_id', js.jstid,
+                        'step_name', js.jstname,
+                        'step_desc', js.jstdesc,
+                        'status', CASE 
+                                    WHEN jsl.jslstatus = 'r' THEN 'Running'
+                                    WHEN jsl.jslstatus = 's' THEN 'Success'
+                                    WHEN jsl.jslstatus = 'f' THEN 'Failed'
+                                    WHEN jsl.jslstatus = 'i' THEN 'Internal Error'
+                                    WHEN jsl.jslstatus = 'd' THEN 'Aborted'
+                                    ELSE jsl.jslstatus
+                                 END,
+                        'start_time', jsl.jslstart,
+                        'duration', jsl.jslduration,
+                        'output', jsl.jslresult
+                    )
+                ) AS steps
+            FROM 
+                pgagent.pga_job j
+            JOIN 
+                pgagent.pga_joblog jl ON j.jobid = jl.jlgjobid
+            LEFT JOIN 
+                pgagent.pga_jobsteplog jsl ON jl.jlgid = jsl.jsljlgid
+            LEFT JOIN 
+                pgagent.pga_jobstep js ON jsl.jsljstid = js.jstid
+            WHERE 
+                j.jobid = %s
+            GROUP BY 
+                j.jobname, jl.jlgid, jl.jlgjobid, jl.jlgstatus, jl.jlgstart, jl.jlgduration
+            ORDER BY 
+                jl.jlgstart DESC
+            LIMIT 10
+            """,
+            (jobid,)
+        )
+        
+        if not status:
+            return make_json_response(
+                success=0,
+                errormsg=gettext("Error retrieving job log: {}".format(job_log)),
+                status=500
+            )
+            
+        return make_json_response(
+            success=1,
+            data=job_log
+        )
+        
+    except Exception as e:
+        import traceback
+        error_traceback = traceback.format_exc()
+        return make_json_response(
+            success=0,
+            errormsg=str(e),
+            info=error_traceback,
+            status=500
+        )

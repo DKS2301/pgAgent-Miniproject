@@ -5246,7 +5246,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"chart.js@npm:^4.4.7":
+"chart.js@npm:^4.4.8":
   version: 4.4.8
   resolution: "chart.js@npm:4.4.8"
   dependencies:
@@ -12865,6 +12865,16 @@ __metadata:
   languageName: node
   linkType: hard
 
+"react-chartjs-2@npm:^5.3.0":
+  version: 5.3.0
+  resolution: "react-chartjs-2@npm:5.3.0"
+  peerDependencies:
+    chart.js: ^4.1.1
+    react: ^16.8.0 || ^17.0.0 || ^18.0.0 || ^19.0.0
+  checksum: af05212a1e30a98379959dd2cd4670ff29ca6e9b1ad5d54d73ddc4336f463567fb0386f33dbc9de01ea724ac75dd0b7a8374e3936a91c7751b7c20c19ef3e920
+  languageName: node
+  linkType: hard
+
 "react-checkbox-tree@npm:^1.7.2":
   version: 1.8.0
   resolution: "react-checkbox-tree@npm:1.8.0"
@@ -13638,7 +13648,7 @@ __metadata:
     browserfs: ^1.4.3
     browserify: ^17.0.0
     buffer: ^6.0.3
-    chart.js: ^4.4.7
+    chart.js: ^4.4.8
     chartjs-plugin-zoom: ^2.0.1
     codemirror: ^6.0.1
     convert-units: ^2.3.4
@@ -13687,6 +13697,7 @@ __metadata:
     react: ^18.2.0
     react-arborist: ^3.2.0
     react-aspen: ^1.1.0
+    react-chartjs-2: ^5.3.0
     react-checkbox-tree: ^1.7.2
     react-data-grid: "https://github.com/pgadmin-org/react-data-grid.git#3dfc2ca01a046d55c1c7a45392dcec104815dc76"
     react-dnd: ^16.0.1
@@ -13705,7 +13716,7 @@ __metadata:
     resize-observer-polyfill: ^1.5.1
     shim-loader: ^1.0.1
     snapsvg-cjs: ^0.0.6
-    socket.io-client: ^4.5.0
+    socket.io-client: ^4.8.1
     split.js: ^1.5.10
     sql-formatter: ^15.4.0
     style-loader: ^4.0.0
@@ -14182,7 +14193,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"socket.io-client@npm:^4.5.0":
+"socket.io-client@npm:^4.8.1":
   version: 4.8.1
   resolution: "socket.io-client@npm:4.8.1"
   dependencies:

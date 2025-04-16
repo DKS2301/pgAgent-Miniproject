@@ -11,7 +11,7 @@ import gettext from 'sources/gettext';
 import BaseUISchema from 'sources/SchemaView/base_schema.ui';
 import { isEmptyString } from 'sources/validators';
 import moment from 'moment';
-import { WEEKDAYS, MONTHS, HOURS, MINUTES, PGAGENT_MONTHDAYS } from '../../../../../../static/js/constants';
+import { WEEKDAYS, OCCURRENCE, MONTHS, HOURS, MINUTES, PGAGENT_MONTHDAYS } from '../../../../../../static/js/constants';
 import { DaysSchema, TimesSchema } from './repeat.ui';
 
 export class ExceptionsSchema extends BaseUISchema {
@@ -73,6 +73,7 @@ export default class PgaJobScheduleSchema extends BaseUISchema {
       jscstart: null,
       jscend: null,
       jscweekdays: _.map(WEEKDAYS, function() { return false; }),
+      jscoccurrence: _.map(OCCURRENCE, function() {return false; }),
       jscmonthdays: _.map(PGAGENT_MONTHDAYS, function() { return false; }),
       jscmonths: _.map(MONTHS, function() { return false; }),
       jschours: _.map(HOURS, function() { return false; }),
@@ -137,7 +138,7 @@ export default class PgaJobScheduleSchema extends BaseUISchema {
           '</li><li>',
           gettext('For each selected time or date element, the schedule will execute.'),
           '</li><li>',
-          gettext('e.g. To execute at 5 minutes past every hour, simply select ‘05’ in the Minutes list box.'),
+          gettext('e.g. To execute at 5 minutes past every hour, simply select "05" in the Minutes list box.'),
           '</li><li>',
           gettext('Values from more than one field may be specified in order to further control the schedule.'),
           '</li><li>',
@@ -153,6 +154,16 @@ export default class PgaJobScheduleSchema extends BaseUISchema {
           formatter: {
             fromRaw: (backendVal)=> {
               return obj.customFromRaw(backendVal, WEEKDAYS);
+            }
+          },
+        }
+      }, {
+        id: 'jscoccurrence', label: gettext('Occurrence'), type: 'text',
+        mode: ['properties'],
+        controlProps: {
+          formatter: {
+            fromRaw: (backendVal)=> {
+              return obj.customFromRaw(backendVal, OCCURRENCE);
             }
           },
         }

@@ -29,6 +29,7 @@ import Summary from './SystemStats/Summary';
 import CpuDetails from './SystemStats/CpuDetails';
 import Memory from './SystemStats/Memory';
 import Storage from './SystemStats/Storage';
+import JobMonitor from './JobMonitor';
 import withStandardTabInfo from '../../../static/js/helpers/withStandardTabInfo';
 import { BROWSER_PANELS } from '../../../browser/static/js/constants';
 import { usePgAdmin } from '../../../static/js/PgAdminProvider';
@@ -320,6 +321,7 @@ function Dashboard({
   if(treeNodeInfo?.server?.replication_type) {
     mainTabs.push(gettext('Replication'));
   }
+  mainTabs.push(gettext('Job Monitor'));
   let systemStatsTabs = [gettext('Summary'), gettext('CPU'), gettext('Memory'), gettext('Storage')];
 
   const mainTabChanged = (e, tabVal) => {
@@ -824,7 +826,7 @@ function Dashboard({
   useEffect(() => {
 
     // disable replication tab
-    if(!treeNodeInfo?.server?.replication_type && mainTabVal == 5) {
+    if(!treeNodeInfo?.server?.replication_type && mainTabVal === mainTabs.indexOf(gettext('Replication'))) {
       setMainTabVal(0);
     }
 
@@ -1194,11 +1196,13 @@ function Dashboard({
                   }
                 </Box>
               </TabPanel>
-              {/* Replication */}
-              <TabPanel value={mainTabVal} index={5} classNameRoot='Dashboard-tabPanel'>
-                <Replication key={sid} sid={sid} node={node}
-                  preferences={preferences} treeNodeInfo={treeNodeInfo} nodeData={nodeData} pageVisible={props.isActive} />
-              </TabPanel>
+              {/* Job Monitor */}
+              {nodeData && (nodeData._type === 'pga_job'||nodeData._type === 'coll-pga_job') && (
+                <TabPanel value={mainTabVal} index={mainTabs.indexOf(gettext('Job Monitor'))} classNameRoot='Dashboard-tabPanel'>
+                  <JobMonitor key={sid} sid={sid} node={node}
+                    preferences={preferences} treeNodeInfo={treeNodeInfo} nodeData={nodeData} pageVisible={props.isActive} />
+                </TabPanel>
+              )}
             </Box>
           </Box>
         </Box>

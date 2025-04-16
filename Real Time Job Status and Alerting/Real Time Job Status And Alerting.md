@@ -1,18 +1,19 @@
 # Real-Time Job Status & Alerting System for pgAdmin4 + pgAgent
 
-A powerful enhancement for **pgAdmin4** that enables real-time updates for **pgAgent job status** and **email alerting**, powered by **Socket.IO**, **PostgreSQL NOTIFY**, and **custom job subscriptions**.
+A powerful enhancement for **pgAdmin4** that enables real-time updates for **pgAgent job status**, **email alerting**, and **interactive job monitoring**, powered by **Socket.IO**, **PostgreSQL NOTIFY**, and **custom job subscriptions**.
 
-##  Overview
+## Overview
 
 This module enhances pgAdmin's job management capabilities by:
 - Listening to **PostgreSQL NOTIFY events**
 - Sending **instant browser updates** using **Socket.IO**
 - Dispatching **email alerts** via **libcurl SMTP**
 - Letting users **subscribe only to selected jobs** for notifications
+- Providing **interactive job monitoring** through a modern React-based dashboard
 
 ---
 
-##  Architecture Overview
+## Architecture Overview
 
 > Real Time Job Status Workflow :  
 <img src="./images/workflow.png" alt="System Architecture"/>
@@ -35,7 +36,51 @@ This module enhances pgAdmin's job management capabilities by:
 
 ## 🔧 Core Components
 
-### 1. Socket.IO Server (Python)
+### 1. Job Monitor Dashboard (React)
+
+**Key Features:**
+- Real-time job status visualization
+- Interactive charts and statistics
+- Advanced filtering capabilities
+- Detailed job logs and analytics
+
+```javascript
+// Socket connection setup
+useEffect(() => {
+  if (!sid || !pageVisible) return;
+  const setupSocket = () => {
+    try {
+      const pgaJobNode = pgAdmin.Browser.Nodes['pga_job'];
+      // Socket initialization and event handling
+      const onJobStatusUpdate = async (data) => {
+        // Handle job status updates
+      };
+    } catch (error) {
+      console.error('[JobMonitor] Error setting up socket:', error);
+    }
+  };
+  setupSocket();
+}, [sid, pageVisible]);
+```
+
+**Statistics Dashboard:**
+```javascript
+const renderJobStats = () => {
+  return (
+    <Grid2 container spacing={5}>
+      <StatCardItem 
+        title={gettext('Total Jobs')} 
+        value={summary.total_jobs || 0} 
+        status="total" 
+        icon={<SportsScoreIcon color="primary" />}
+      />
+      // ... other stat cards
+    </Grid2>
+  );
+};
+```
+
+### 2. Socket.IO Server (Python)
 
 📄 [`__init__.py`](pgadmin4/web/pgadmin/browser/server_groups/servers/pgagent/__init__.py)
 
@@ -65,10 +110,11 @@ async def check_notifications(app, sid, client_sid):
 
 ---
 
-### 2.  Frontend Integration (JavaScript)
+### 3. Frontend Integration (JavaScript)
 
 📄 [`pga_job.js`](pgadmin4/web/pgadmin/browser/server_groups/servers/pgagent/static/js/pga_job.js)
 📄 [`pga_job.ui.js`](pgadmin4/web/pgadmin/browser/server_groups/servers/pgagent/static/js/pga_job.ui.js)
+📄 [`JobMonitor.jsx`](pgadmin4/web/pgadmin/dashboard/static/js/JobMonitor.jsx)
 
 
 **Features:**
@@ -93,7 +139,7 @@ startKeepAlivePing: function() {
 
 ---
 
-### 3. 📬 Email Notification Module (C++)
+### 4. 📬 Email Notification Module (C++)
 
 📄 [`notification.cpp`](pgagent/notification.cpp)
 
@@ -159,64 +205,77 @@ if (isSubscribed(job_id)) {
 
 ---
 
-##  How to Test the Setup
+## User Interaction Guide
+
+### 1. Job Monitoring Dashboard
+- **Real-time Updates**: View live job status changes
+- **Statistics**: Monitor job counts and success rates
+- **Charts**: Analyze trends through interactive visualizations
+- **Filtering**: Customize views by status, time, and specific jobs
+
+### 2. Alert Management
+- **Email Notifications**: Configure and receive alerts
+- **Job Subscriptions**: Select specific jobs for monitoring
+- **Status Tracking**: Monitor job progress and failures
+
+### 3. Data Analysis
+- **Historical Data**: View past job performance
+- **Trend Analysis**: Identify patterns and issues
+- **Log Access**: Review detailed execution logs
+
+---
+
+## How to Test the Setup
 
 ### 1. Prerequisites
 - PostgreSQL configured with pgAgent schema
 - pgAdmin4 built from this modified version
 - Python dependencies: `Flask`, `Flask-SocketIO`, `psycopg[binary]`
-- C++ libraries : libcurl
+- C++ libraries: libcurl
+- React dependencies: Material-UI, Chart.js, Socket.io-client
 
-### 2. Set Environment Variables for Email
+### 2. Set Environment Variables
 
 ```bash
 export SMTP_HOST="smtp.gmail.com"
 export SMTP_PORT="587"
 export SMTP_USER="your-email@gmail.com"
 export SMTP_PASS="your-password"
-
 ```
 
 ### 3. Run and Monitor
 
-- Launch pgAdmin and pgAgent
-- Select server → Open `pgAgent Jobs`
-- Enable subscription for target jobs
-- Trigger job execution or failure
-- Watch:
-  - Real-time UI update
-  - Email alert
+1. Launch pgAdmin and pgAgent
+2. Navigate to the Job Monitor dashboard
+3. Configure job subscriptions
+4. Monitor real-time updates
+5. Review email notifications
 
 ---
 
 ## ✨ Screenshots
+### Job Monitor Dashboard
+![Job Monitor Dashboard](./images/job-monitor-dashboard.png)
+
 ### Custom Subscription to Jobs
 ![Alert Subscription](./images/custom%20subscription.png)
-
-### Socket initialization on server selection
-![Socket Init](./images/socket%20initialised%20on%20tree%20selection.png)
-
-### Live Socket.IO messages
-![WebSocket messages](./images/Webscocket%20messages.png)
 
 ### Real-time UI status change
 ![Live status](./images/socket%20client%20receiving%20notify%20event.png)
 
-### SMTP Email Dispatch
-![Sending mail](./images/pgAgent%20sending%20email.png)
-
 ### Alert Email Example
 ![Mail received](./images/pgagent%20alert%20mail.png)
 
+### Job Monitor Dashboard
+
+![Dashboard](./images/jobmonitor.png)
+
+### Analytics
+
+![Graphs](./images/graph2.png)
 ---
 
-## Demo
-
-https://github.com/user-attachments/assets/8e1b8f3f-a02e-44dc-865c-1b12ed9ec169
-
----
-
-##  Implementation Details
+## Implementation Details
 
 ### Server-Side Thread Management
 
@@ -236,7 +295,7 @@ if (UserHasSubscribed(job_id)) {
 
 ---
 
-##  Error Handling Strategy
+## Error Handling Strategy
 
 | Component     | Failure Case                 | Mitigation                |
 |---------------|------------------------------|---------------------------|
@@ -259,9 +318,12 @@ if (UserHasSubscribed(job_id)) {
 
 ## 🚀 Future Enhancements
 
--  Retry failed jobs from UI
--  View job logs directly
--  Dashboard for job trends & failures
+- Retry failed jobs from UI
+- View job logs directly
+- Dashboard for job trends & failures
+- Enhanced chart customization
+- Dark mode support
+- Export functionality for logs and charts
 
 ---
 
@@ -282,7 +344,7 @@ if (UserHasSubscribed(job_id)) {
 |----------|-------------------------------|
 | Backend  | Flask-SocketIO, psycopg, asyncio |
 | C++ Core | libcurl, nlohmann/json, Boost |
-| Frontend | Socket.IO, jQuery, pgAdmin JS |
+| Frontend | React, Material-UI, Chart.js, Socket.io-client |
 
 ---
 
@@ -303,12 +365,21 @@ Real-Time-Job-Status-and-Alerting/
 │   └── browser/server_groups/servers/pgagent/
 │       ├── __init__.py       # Python backend w/ socket server
 │       └── static/js/
-│           └── pga_job.js    # JS client-side handler
+│           ├── pga_job.js    # JS client-side handler
+│           └── job-monitor/  # React components
 ├── images/                   # Screenshots
 ├── README.md
 ```
 
 ---
 
+## Contributing
 
-Let me know if you'd like this saved as a file or added to your repo directly!
+We welcome contributions to enhance the Job Monitor component. Please follow these guidelines:
+1. Fork the repository
+2. Create a feature branch
+3. Submit a pull request with detailed description
+
+## License
+
+This component is part of pgAdmin 4 and is released under the PostgreSQL License.

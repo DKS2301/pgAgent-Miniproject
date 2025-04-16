@@ -15,6 +15,7 @@
 #include <fstream>
 #include <sstream>
 #include <iostream>
+#include <iomanip>
 
 #if !BOOST_OS_WINDOWS
 #include <errno.h>
@@ -704,6 +705,34 @@ void UpdateLastNotificationTime(const std::string& jobId) {
     conn->Return();
 }
 
+std::string escapeJsonString(const std::string& input, bool escapeUnicode = false) {
+    std::ostringstream ss;
+    for (unsigned char c : input) {
+        switch (c) {
+            case '\"': ss << "\\\""; break;
+            case '\\': ss << "\\\\"; break;
+            case '\b': ss << "\\b";  break;
+            case '\f': ss << "\\f";  break;
+            case '\n': ss << "\\n";  break;
+            case '\r': ss << "\\r";  break;
+            case '\t': ss << "\\t";  break;
+            case '/':  ss << "\\/";  break;
+            case '\0': ss << "\\0";  break;
+            case '\'': ss << "\'\'"; break;
+            default:
+                // Control characters or special Unicode characters
+                if (c < 0x20 || c == 0x2028 || c == 0x2029 || escapeUnicode) {
+                    ss << "\\u"
+                       << std::hex << std::setw(4) << std::setfill('0')
+                       << static_cast<int>(c);
+                } else {
+                    ss << c;
+                }
+        }
+    }
+    return ss.str();
+}
+
 // Notify job status and buffer failures
 void NotifyJobStatus(const std::string& jobId, const std::string& status, const std::string& description) {
     std::string timestamp = GetCurrentTimestamp();
@@ -715,21 +744,17 @@ void NotifyJobStatus(const std::string& jobId, const std::string& status, const 
     if (!GetJobNotificationSettings(jobId, settings)) {
         LogMessage("🔍Could not get notification settings for job " + jobId + ", using default behavior", LOG_DEBUG);
     }
-    size_t pos = 0;
+
+    std::string escapedDescription = escapeJsonString(description);
+
     // Create JSON payload
     std::string payload = "{\"job_id\": \"" + jobId + "\", \"status\": \"" + status + 
-                        //   "\", \"description\": \"" + escapedDescription + 
+                          "\", \"description\": \"" + escapedDescription + 
                           "\", \"timestamp\": \"" + timestamp + "\"";
     
     // Add custom text if available
     if (!settings.customText.empty()) {
-        std::string escapedCustomText = settings.customText;
-        // Escape special characters in custom text
-        pos = 0;
-        while ((pos = escapedCustomText.find("\"", pos)) != std::string::npos) {
-            escapedCustomText.replace(pos, 1, "\\\"");
-            pos += 2;
-        }
+        std::string escapedCustomText = escapeJsonString(settings.customText);
         payload += ", \"custom_text\": \"" + escapedCustomText + "\"";
     }
     
@@ -740,6 +765,7 @@ void NotifyJobStatus(const std::string& jobId, const std::string& status, const 
     payload += "}";
     
     // This ensures the pgAdmin UI can still show real-time updates for jobs
+    LogMessage("🔍DEBUG: Sending notification for job " + jobId + " with payload: " + payload, LOG_DEBUG);
     std::string query = "NOTIFY job_status_update, '" + payload + "'";
     DBconn* notifyConn = DBconn::Get();
     if (!notifyConn) {

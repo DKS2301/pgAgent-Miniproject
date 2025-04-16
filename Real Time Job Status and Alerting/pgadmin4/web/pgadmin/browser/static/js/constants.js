@@ -46,7 +46,6 @@ export const BROWSER_PANELS = {
   WELCOME_PSQL_TOOL: 'id-welcome-psql'
 };
 
-
 export const WORKSPACES = {
   DEFAULT: 'default_workspace',
   QUERY_TOOL: 'query_tool_workspace',
@@ -80,6 +79,13 @@ export const WEEKDAYS = [
     {label: gettext('27th'), value: '27'}, {label: gettext('28th'), value: '28'},
     {label: gettext('29th'), value: '29'}, {label: gettext('30th'), value: '30'},
     {label: gettext('31st'), value: '31'},
+  ],
+  OCCURRENCE = [
+    {label: gettext('1st'),value: '1'},
+    {label: gettext('2nd'),value: '2'},
+    {label: gettext('3rd'),value: '3'}, 
+    {label: gettext('4th'),value: '4'},
+    {label: gettext('last'),value: '5'},
   ],
   MONTHS = [
     {label: gettext('January'),value: '1'}, {label: gettext('February'),value: '2'},
