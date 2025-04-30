@@ -1,6 +1,6 @@
 import gettext from 'sources/gettext';
 import { BaseUISchema } from '../../../../../../../static/js/SchemaView';
-import { WEEKDAYS, PGAGENT_MONTHDAYS, MONTHS, HOURS, MINUTES, OCCURRENCE } from '../../../../../../static/js/constants';
+import { WEEKDAYS, PGAGENT_MONTHDAYS, MONTHS, HOURS, MINUTES} from '../../../../../../static/js/constants';
 
 
 const BooleanArrayFormatter = {
@@ -56,6 +56,8 @@ export class TimesSchema extends BaseUISchema {
       {
         id: 'jschours', label: gettext('Hours'), type: 'select',
         group: gettext('Times'),
+        deps: ['jscalternate', 'jscinterval'],
+        disabled: (state) => state.jscalternate || state.jscinterval > 0,
         controlProps: { allowClear: true, multiple: true, allowSelectAll: true,
           placeholder: gettext('Select the hours...'),
           formatter: BooleanArrayFormatter,
@@ -64,6 +66,8 @@ export class TimesSchema extends BaseUISchema {
       }, {
         id: 'jscminutes', label: gettext('Minutes'), type: 'select',
         group: gettext('Times'),
+        deps: ['jscalternate', 'jscinterval'],
+        disabled: (state) => state.jscalternate || state.jscinterval > 0,
         controlProps: { allowClear: true, multiple: true, allowSelectAll: true,
           placeholder: gettext('Select the minutes...'),
           formatter: BooleanArrayFormatter,
@@ -76,13 +80,12 @@ export class TimesSchema extends BaseUISchema {
 
 export class DaysSchema extends BaseUISchema {
   constructor(initValues={}, schemaConfig={
-    weekdays: {}, monthdays: {}, months: {}, occurrence: {}
+    weekdays: {}, monthdays: {}, months: {}
   }) {
     super({
       jscweekdays: _.map(WEEKDAYS, function() { return false; }),
       jscmonthdays: _.map(PGAGENT_MONTHDAYS, function() { return false; }),
       jscmonths: _.map(MONTHS, function() { return false; }),
-      jscoccurrence: _.map(OCCURRENCE, function() { return false; }),
       ...initValues,
     });
 
@@ -94,6 +97,8 @@ export class DaysSchema extends BaseUISchema {
       {
         id: 'jscweekdays', label: gettext('Week Days'), type: 'select',
         group: gettext('Days'),
+        deps: ['jscalternate', 'jscinterval'],
+        disabled: (state) => state.jscalternate || state.jscinterval > 0,
         controlProps: { allowClear: true, multiple: true, allowSelectAll: true,
           placeholder: gettext('Select the weekdays...'),
           formatter: BooleanArrayFormatter,
@@ -102,6 +107,8 @@ export class DaysSchema extends BaseUISchema {
       }, {
         id: 'jscmonthdays', label: gettext('Month Days'), type: 'select',
         group: gettext('Days'),
+        deps: ['jscalternate', 'jscinterval'],
+        disabled: (state) => state.jscalternate || state.jscinterval > 0,
         controlProps: { allowClear: true, multiple: true, allowSelectAll: true,
           placeholder: gettext('Select the month days...'),
           formatter: BooleanArrayFormatter,
@@ -110,19 +117,13 @@ export class DaysSchema extends BaseUISchema {
       }, {
         id: 'jscmonths', label: gettext('Months'), type: 'select',
         group: gettext('Days'),
+        deps: ['jscalternate', 'jscinterval'],
+        disabled: (state) => state.jscalternate || state.jscinterval > 0,
         controlProps: { allowClear: true, multiple: true, allowSelectAll: true,
           placeholder: gettext('Select the months...'),
           formatter: BooleanArrayFormatter,
         },
         options: MONTHS, ...(this.schemaConfig.months??{})
-      }, {
-        id: 'jscoccurrence', label: gettext('Occurrence'), type: 'select',
-        group: gettext('Days'),
-        controlProps: { allowClear: true, multiple: true, allowSelectAll: true,
-          placeholder: gettext('Select the occurrence...'),
-          formatter: BooleanArrayFormatter,
-        },
-        options: OCCURRENCE, ...(this.schemaConfig.occurrence??{})
       }
     ];
   }

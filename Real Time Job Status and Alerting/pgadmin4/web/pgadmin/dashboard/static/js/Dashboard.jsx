@@ -30,6 +30,7 @@ import CpuDetails from './SystemStats/CpuDetails';
 import Memory from './SystemStats/Memory';
 import Storage from './SystemStats/Storage';
 import JobMonitor from './JobMonitor';
+import AuditLog from './AuditLog';
 import withStandardTabInfo from '../../../static/js/helpers/withStandardTabInfo';
 import { BROWSER_PANELS } from '../../../browser/static/js/constants';
 import { usePgAdmin } from '../../../static/js/PgAdminProvider';
@@ -37,7 +38,6 @@ import usePreferences from '../../../preferences/static/js/store';
 import ErrorBoundary from '../../../static/js/helpers/ErrorBoundary';
 import { parseApiError } from '../../../static/js/api_instance';
 import SectionContainer from './components/SectionContainer';
-import Replication from './Replication';
 import { getExpandCell } from '../../../static/js/components/PgReactTableStyled';
 import CodeMirror from '../../../static/js/components/ReactCodeMirror';
 import GetAppRoundedIcon from '@mui/icons-material/GetAppRounded';
@@ -321,7 +321,7 @@ function Dashboard({
   if(treeNodeInfo?.server?.replication_type) {
     mainTabs.push(gettext('Replication'));
   }
-  mainTabs.push(gettext('Job Monitor'));
+  mainTabs.push(gettext('Job Monitor'), gettext('Audit Logs'));
   let systemStatsTabs = [gettext('Summary'), gettext('CPU'), gettext('Memory'), gettext('Storage')];
 
   const mainTabChanged = (e, tabVal) => {
@@ -1197,12 +1197,22 @@ function Dashboard({
                 </Box>
               </TabPanel>
               {/* Job Monitor */}
-              {nodeData && (nodeData._type === 'pga_job'||nodeData._type === 'coll-pga_job') && (
+              {nodeData && (nodeData._type === 'pga_job'||nodeData._type === 'coll-pga_job') ? (
                 <TabPanel value={mainTabVal} index={mainTabs.indexOf(gettext('Job Monitor'))} classNameRoot='Dashboard-tabPanel'>
                   <JobMonitor key={sid} sid={sid} node={node}
                     preferences={preferences} treeNodeInfo={treeNodeInfo} nodeData={nodeData} pageVisible={props.isActive} />
                 </TabPanel>
+              ) : (
+                <TabPanel value={mainTabVal} index={mainTabs.indexOf(gettext('Job Monitor'))} classNameRoot='Dashboard-tabPanel'>
+                  <div className='Dashboard-emptyPanel'>
+                    <EmptyPanelMessage text={gettext('Select a job to view job monitor. Only available for pgAgent.')}/>
+                  </div>
+                </TabPanel>
               )}
+              {/* Audit Logs */}
+              <TabPanel value={mainTabVal} index={mainTabs.indexOf(gettext('Audit Logs'))} classNameRoot='Dashboard-tabPanel'>
+                <AuditLog key={sid} sid={sid} treeNodeInfo={treeNodeInfo} pageVisible={props.isActive} />
+              </TabPanel>
             </Box>
           </Box>
         </Box>

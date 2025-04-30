@@ -16,7 +16,6 @@ const _socketRegistry = {
   connections: {},
   registerSocket: function(namespace, socket) {
     this.connections[namespace] = socket;
-    console.log(`[Socket.IO] Registered socket for namespace ${namespace}`);
     return socket;
   },
   getSocket: function(namespace) {
@@ -24,7 +23,6 @@ const _socketRegistry = {
   },
   removeSocket: function(namespace) {
     if (this.connections[namespace]) {
-      console.log(`[Socket.IO] Removed socket for namespace ${namespace}`);
       delete this.connections[namespace];
     }
   },
@@ -46,20 +44,15 @@ const socket_io = io;
 export { socket_io as io };
 
 // Add a connect method to make the interface more compatible with older code
-socket_io.connect = function(namespace, options) {
-  console.log('[Socket.IO] io.connect called directly for:', namespace);
-  
+socket_io.connect = function(namespace, options) {  
   // First check if we already have a socket for this namespace
   const existingSocket = _socketRegistry.getSocket(namespace);
   if (existingSocket && existingSocket.connected) {
-    console.log('[Socket.IO] Reusing existing connected socket for namespace', namespace);
     return existingSocket;
   }
   
   try {
-    const socketUrl = namespace.startsWith('/') ? namespace : '/' + namespace;
-    console.log('[Socket.IO] Creating socket connection via io.connect to:', socketUrl, `\t url is ${url_for('pgadmin.root')}/socket.io`);
-    
+    const socketUrl = namespace.startsWith('/') ? namespace : '/' + namespace;    
     const socketObj = socket_io(socketUrl, {
       path: `${url_for('pgadmin.root')}/socket.io`,
       pingTimeout: 120000,
@@ -81,21 +74,16 @@ socket_io.connect = function(namespace, options) {
   }
 };
 
-export function openSocket(namespace, options) {
-  console.log('[Socket.IO] openSocket called with namespace:', namespace);
-  
+export function openSocket(namespace, options) {  
   // First check if we already have a socket for this namespace
   const existingSocket = _socketRegistry.getSocket(namespace);
   if (existingSocket && existingSocket.connected) {
-    console.log('[Socket.IO] Reusing existing connected socket for namespace', namespace);
     return Promise.resolve(existingSocket);
   }
   
   return new Promise((resolve, reject) => {
     try {
-      const socketUrl = namespace.startsWith('/') ? namespace : '/' + namespace;
-      console.log('[Socket.IO] Creating socket connection to:', socketUrl);
-      
+      const socketUrl = namespace.startsWith('/') ? namespace : '/' + namespace;      
       const socketObj = io(socketUrl, {
         path: `${url_for('pgadmin.root')}/socket.io`,
         pingTimeout: 120000,
@@ -107,14 +95,7 @@ export function openSocket(namespace, options) {
         ...options,
       });
 
-      console.log('[Socket.IO] Socket object created, awaiting connection...');
-
-      socketObj.on('connect', () => {
-        console.log('[Socket.IO] Socket connected with ID:', socketObj.id);
-      });
-
-      socketObj.on('connected', (data) => {
-        console.log('[Socket.IO] Connected event received, socket ready:', data);
+      socketObj.on('connected', () => {
         _socketRegistry.registerSocket(namespace, socketObj);
         resolve(socketObj);
       });
@@ -126,7 +107,6 @@ export function openSocket(namespace, options) {
       });
 
       socketObj.on('disconnect', (reason) => {
-        console.log('[Socket.IO] Socket disconnected:', reason);
         _socketRegistry.removeSocket(namespace);
         // Only reject if this happens during initial connection
         if (!socketObj.wasConnected) {
@@ -166,16 +146,13 @@ export function openSocket(namespace, options) {
 }
 
 export function socketApiGet(socket, endpoint, params) {
-  return new Promise((resolve, reject) => {
-    console.log(`[Socket.IO] Emitting ${endpoint} with params:`, params);
-    
+  return new Promise((resolve, reject) => {    
     socket.emit(endpoint, params);
     
     const successEvent = `${endpoint}_success`;
     const failureEvent = `${endpoint}_failed`;
     
     const successHandler = (data) => {
-      console.log(`[Socket.IO] Received ${successEvent}:`, data);
       cleanup();
       resolve(data);
     };
@@ -224,34 +201,23 @@ export default {
   socketApiGet,
   registry: _socketRegistry
 };
-
 // Add a debug function to window object to help diagnose socket issues
 if (typeof window !== 'undefined') {
   window._checkSocketExports = function() {
-    console.log('==== Socket.IO Export Check ====');
-    console.log('socket_instance default export:', typeof socket_instance !== 'undefined' ? 'Available' : 'Missing');
-    
-    if (typeof socket_instance !== 'undefined') {
-      console.log('- socket_instance.io:', typeof socket_instance.io !== 'undefined' ? 'Available' : 'Missing');
-      if (typeof socket_instance.io !== 'undefined') {
-        console.log('  - socket_instance.io.connect:', typeof socket_instance.io.connect === 'function' ? 'Available' : 'Missing');
-      }
-      console.log('- socket_instance.openSocket:', typeof socket_instance.openSocket === 'function' ? 'Available' : 'Missing');
+    if (typeof socket_instance === 'undefined') {
+      console.warn('[Socket.IO] socket_instance is not defined');
     }
     
-    console.log('Direct io export:', typeof io !== 'undefined' ? 'Available' : 'Missing');
-    if (typeof io !== 'undefined') {
-      console.log('- io.connect:', typeof socket_io.connect === 'function' ? 'Available' : 'Missing');
+    if (typeof socket_io === 'undefined') {
+      console.warn('[Socket.IO] socket_io client is not available');
     }
-    
-    console.log('Socket.IO client from import:', typeof socket_io !== 'undefined' ? 'Available' : 'Missing');
     
     return {
       socket_instance: typeof socket_instance !== 'undefined',
       socket_instance_io: typeof socket_instance !== 'undefined' && typeof socket_instance.io !== 'undefined',
       socket_instance_io_connect: typeof socket_instance !== 'undefined' && 
-                                  typeof socket_instance.io !== 'undefined' && 
-                                  typeof socket_instance.io.connect === 'function',
+        typeof socket_instance.io !== 'undefined' && 
+        typeof socket_instance.io.connect === 'function',
       direct_io: typeof io !== 'undefined',
       direct_io_connect: typeof io !== 'undefined' && typeof socket_io.connect === 'function',
       socket_io: typeof socket_io !== 'undefined'

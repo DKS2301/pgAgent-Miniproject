@@ -13,7 +13,7 @@ job_status_stats AS (
     SELECT
         SUM(CASE WHEN jlgstatus = 'r' THEN 1 ELSE 0 END) AS running_jobs,
         SUM(CASE WHEN jlgstatus = 's' THEN 1 ELSE 0 END) AS successful_jobs,
-        SUM(CASE WHEN jlgstatus = 'f' THEN 1 ELSE 0 END) AS failed_jobs
+        SUM(CASE WHEN jlgstatus = 'f' OR jlgstatus = 'x' THEN 1 ELSE 0 END) AS failed_jobs
     FROM 
         pgagent.pga_joblog
     WHERE 
@@ -63,7 +63,7 @@ active_jobs AS (
         CASE 
             WHEN jl.jlgstatus = 'r' THEN 'Running'
             WHEN jl.jlgstatus = 's' THEN 'Success'
-            WHEN jl.jlgstatus = 'f' THEN 'Failed'
+            WHEN jl.jlgstatus = 'f' or jl.jlgstatus='x' THEN 'Failed'
             WHEN jl.jlgstatus = 'i' THEN 'Internal Error'
             WHEN jl.jlgstatus = 'd' THEN 'Aborted'
             WHEN j.jobenabled THEN 'Enabled'

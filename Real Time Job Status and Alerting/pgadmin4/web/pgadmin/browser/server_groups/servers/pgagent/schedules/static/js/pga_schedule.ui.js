@@ -13,6 +13,9 @@ import { isEmptyString } from 'sources/validators';
 import moment from 'moment';
 import { WEEKDAYS, OCCURRENCE, MONTHS, HOURS, MINUTES, PGAGENT_MONTHDAYS } from '../../../../../../static/js/constants';
 import { DaysSchema, TimesSchema } from './repeat.ui';
+//changes
+import { OccurrenceSchema, IntervalSchema , DSTSchema} from './advanced.ui';
+//change end
 
 export class ExceptionsSchema extends BaseUISchema {
   constructor(fieldOptions={}, initValues={}) {
@@ -73,11 +76,16 @@ export default class PgaJobScheduleSchema extends BaseUISchema {
       jscstart: null,
       jscend: null,
       jscweekdays: _.map(WEEKDAYS, function() { return false; }),
-      jscoccurrence: _.map(OCCURRENCE, function() {return false; }),
       jscmonthdays: _.map(PGAGENT_MONTHDAYS, function() { return false; }),
       jscmonths: _.map(MONTHS, function() { return false; }),
       jschours: _.map(HOURS, function() { return false; }),
       jscminutes: _.map(MINUTES, function() { return false; }),
+      jscoccurrence: _.map(OCCURRENCE, function() {return false; }),
+      jscalternate: false,
+      jscinterval: 0,
+      jscdst: false,
+      jscdststart: null,
+      jscdstend: null,
       jscexceptions: [],
       ...initValues,
     });
@@ -215,7 +223,23 @@ export default class PgaJobScheduleSchema extends BaseUISchema {
         type: 'nested-fieldset', mode: ['create','edit'],
         label: gettext('Times'), group: gettext('Repeat'),
         schema : new TimesSchema(),
+      },
+      //changes
+      {
+        type: 'nested-fieldset', mode: ['create','edit'],
+        label: gettext('Occurrence'), group: gettext('Advanced'),
+        schema : new OccurrenceSchema(),
       }, {
+        type: 'nested-fieldset', mode: ['create','edit'],
+        label: gettext('Interval'), group: gettext('Advanced'),
+        schema : new IntervalSchema(),
+      }, {
+        type: 'nested-fieldset', mode: ['create','edit'],
+        label: gettext('Daylight Saving Time'), group: gettext('Advanced'),
+        schema : new DSTSchema(),
+      },
+      //change end
+      {
         id: 'jscexceptions', label: gettext('Exceptions'), type: 'text',
         mode: ['properties'],
         controlProps: {

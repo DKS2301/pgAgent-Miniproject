@@ -1,0 +1,33 @@
+{% macro PROPERTIES(jid, conn, operation_types=None, date_from=None, date_to=None, sort_column='operation_time', sort_order='desc') %}
+SELECT
+    audit_id,
+    operation_type,
+    to_char(operation_time, 'YYYY-MM-DD HH24:MI:SS TZ') as operation_time,
+    operation_user,
+    old_values,
+    new_values,
+    additional_info
+FROM
+    pgagent.pga_job_audit_log
+WHERE
+    job_id = {{ jid }}::integer
+    {% if operation_types %}
+    AND operation_type IN ({{ operation_types }})
+    {% endif %}
+    {% if date_from %}
+    AND operation_time >= '{{ date_from }}'::timestamptz
+    {% endif %}
+    {% if date_to %}
+    AND operation_time <= '{{ date_to }}'::timestamptz
+    {% endif %}
+ORDER BY
+    {% if sort_column == 'audit_id' %}
+        audit_id {% if sort_order == 'asc' %}ASC{% else %}DESC{% endif %}
+    {% elif sort_column == 'operation_type' %}
+        operation_type {% if sort_order == 'asc' %}ASC{% else %}DESC{% endif %}
+    {% elif sort_column == 'operation_user' %}
+        operation_user {% if sort_order == 'asc' %}ASC{% else %}DESC{% endif %}
+    {% else %}
+        operation_time {% if sort_order == 'asc' %}ASC{% else %}DESC{% endif %}
+    {% endif %};
+{% endmacro %}

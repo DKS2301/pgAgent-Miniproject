@@ -6,58 +6,191 @@
 -- Inserting a schedule{% if jid %} (jobid: {{ jid|qtLiteral(conn) }}){% endif %}
 
 INSERT INTO pgagent.pga_schedule(
-    jscjobid, jscname, jscdesc, jscenabled,
-    jscstart, {% if data.jscend %}jscend,{% endif %}
-    jscminutes, jschours, jscweekdays, jscmonthdays, jscmonths, jscoccurrence
-) VALUES (
-    {% if jid %}{{ jid|qtLiteral(conn) }}{% else %}jid{% endif %}, {{ data.jscname|qtLiteral(conn) }}::text, {{ data.jscdesc|qtLiteral(conn) }}::text, {% if data.jscenabled %}true{% else %}false{% endif %},
-    {{ data.jscstart|qtLiteral(conn) }}::timestamp with time zone, {% if data.jscend %}{{ data.jscend|qtLiteral(conn) }}::timestamp with time zone,{% endif %}
-
-    -- Minutes
-    {{ data.jscminutes|qtLiteral(conn) }}::boolean[],
-    -- Hours
-    {{ data.jschours|qtLiteral(conn) }}::boolean[],
-    -- Week days
-    {{ data.jscweekdays|qtLiteral(conn) }}::boolean[],
-    -- Month days
-    {{ data.jscmonthdays|qtLiteral(conn) }}::boolean[],
-    -- Months
-    {{ data.jscmonths|qtLiteral(conn) }}::boolean[],
-    -- Occurrence
-    {{ data.jscoccurrence|qtLiteral(conn) }}::boolean[]
-) RETURNING jscid INTO scid;{% if 'jscexceptions' in data %}
+    jscjobid,
+    jscname,
+    jscdesc,
+    jscenabled,
+    jscalternate,
+    jscinterval,
+    jscstart,
+    {% if data.jscend %} jscend,
+    {% endif %} 
+    jscminutes,
+    jschours,
+    jscweekdays,
+    jscmonthdays,
+    jscmonths,
+    jscoccurrence,
+    jscdst
+    {% if data.jscdst %},
+    jscdststart,
+    jscdstend
+    {% endif %})
+VALUES(
+    {% if jid %} {{ jid|qtLiteral(conn) }} {% else %} jid{% endif %},
+    {{ data.jscname|qtLiteral(conn) }} ::text,
+    {{ data.jscdesc|qtLiteral(conn) }} ::text,
+    {% if data.jscenabled %} true {% else %} false {% endif %},
+    {% if data.jscalternate %} true {% else %} false {% endif %},
+    {% if data.jscinterval is defined and data.jscinterval is not none %} {{ data.jscinterval|qtLiteral(conn) }} {% else %} 0 {% endif %} ::integer,
+    {{ data.jscstart|qtLiteral(conn) }} ::timestamp with time zone,
+    {% if data.jscend %} {{ data.jscend|qtLiteral(conn) }} ::timestamp with time zone, {% endif %} 
+    --Minutes 
+    {{ data.jscminutes|qtLiteral(conn) }} ::boolean[],
+    --Hours 
+    {{ data.jschours|qtLiteral(conn) }} ::boolean[],
+    --Week days 
+    {{ data.jscweekdays|qtLiteral(conn) }} ::boolean[],
+    --Month days 
+    {{ data.jscmonthdays|qtLiteral(conn) }} ::boolean[],
+    --Months 
+    {{ data.jscmonths|qtLiteral(conn) }} ::boolean[],
+    --Occurrence 
+    {{ data.jscoccurrence|qtLiteral(conn) }} ::boolean[],
+    --DST Enable 
+    {% if data.jscdst %} true, {% else %} false {% endif %}
+    --DST Start 
+    {% if data.jscdststart %} {{ data.jscdststart|qtLiteral(conn) }} ::timestamp with time zone, {% endif %} 
+    --DST End 
+    {% if data.jscdstend %} {{ data.jscdstend|qtLiteral(conn) }} ::timestamp with time zone{% endif %}
+) 
+RETURNING jscid INTO scid;
+    {% if 'jscexceptions' in data %}
 {% for exc in data.jscexceptions %}
 
 {{ EXCEPTIONS.INSERT(None, exc, conn) }}{% endfor %}{% endif %}
 {%- endmacro %}
 {% macro UPDATE(jid, jscid, data, conn) -%}
-{% if 'jscname' in data or 'jscenabled' in data or 'jscdesc' in data or 'jscstart' in data or 'jscend' in data or 'jscmonths' in data or 'jscminutes' in data or 'jscmonthdays' in data or 'jschours' in data or 'jscweekdays' in data or 'jscoccurrence' in data %}
+{% if 'jscname' in data or 'jscenabled' in data or 'jscdesc' in data or 'jscstart' in data or 'jscend' in data or 'jscmonths' in data or 'jscminutes' in data or 'jscmonthdays' in data or 'jschours' in data or 'jscweekdays' in data or 'jscoccurrence' in data  or 'jscalternate' in data %}
 
 -- Updating the schedule (id: {{ jscid|qtLiteral(conn) }}, jobid: {{ jid|qtLiteral(conn) }})
-UPDATE pgagent.pga_schedule
-SET{% if 'jscname' in data %}
+UPDATE pgagent.pga_schedule SET
+    {% if 'jscname' in data %}
+        jscname={{ data.jscname|qtLiteral(conn) }}::text
+        {% if 'jscdesc' in data or 'jscstart' in data or 
+            'jscend' in data or 'jscmonths' in data or
+            'jscminutes' in data or 'jscmonthdays' in data or
+            'jschours' in data or 'jscweekdays' in data or
+            'jscoccurrence' in data or 'jscdst' in data or
+            'jscinterval'in data or 'jscenabled' in data or 
+            'jscalternate' in data %},
+        {% endif %}
+    {% endif %}
+    
+    {% if 'jscenabled' in data %}
+        jscenabled={% if data.jscenabled %}true{% else %}false{% endif %}
+        {% if 'jscdesc' in data or 'jscstart' in data or
+            'jscend' in data or 'jscmonths' in data or 
+            'jscminutes' in data or 'jscmonthdays' in data or 
+            'jschours' in data or 'jscweekdays' in data or 
+            'jscoccurrence' in data or 'jscdst' in data or
+            'jscinterval'in data or 'jscalternate' in data %},
+        {% endif %}
+    {% endif %}
+    
+    {% if 'jscalternate' in data %}
+        jscalternate={% if data.jscalternate %}true{% else %}false{% endif %}
+        {% if 'jscdesc' in data or 'jscstart' in data or 
+            'jscend' in data or 'jscmonths' in data or 
+            'jscminutes' in data or 'jscmonthdays' in data or 
+            'jschours' in data or 'jscweekdays' in data or
+            'jscoccurrence' in data or 'jscdst' in data or
+            'jscinterval'in data %},
+        {% endif %}
+    {% endif %}
+    
+    {% if 'jscdesc' in data %}
+        jscdesc={% if data.jscdesc %}{{ data.jscdesc|qtLiteral(conn) }}::text{% else %}''::text{% endif %}
+        {% if 'jscstart' in data or 'jscend' in data or 
+            'jscmonths' in data or 'jscminutes' in data or 
+            'jscmonthdays' in data or 'jschours' in data or 
+            'jscweekdays' in data or 'jscoccurrence' in data or 
+            'jscdst' in data or 'jscinterval' in data %},
+        {% endif %}
+    {% endif %}
+    
+    {% if 'jscstart' in data %}
+        jscstart={{ data.jscstart|qtLiteral(conn) }}::timestamptz
+        {% if 'jscend' in data or 'jscmonths' in data or 
+            'jscminutes' in data or 'jscmonthdays' in data or 
+            'jschours' in data or 'jscweekdays' in data or
+            'jscoccurrence' in data or 'jscdst' in data or
+            'jscinterval'in data %},
+        {% endif %}
+    {% endif %}
+    
+    {% if 'jscend' in data %}
+        jscend={% if data.jscend %}{{ data.jscend|qtLiteral(conn) }}::timestamptz{% else %}NULL::timestamptz{% endif %}
+        {% if 'jscmonths' in data or 'jscminutes' in data or 
+            'jscmonthdays' in data or 'jschours' in data or 
+            'jscweekdays' in data or 'jscoccurrence' in data or 
+            'jscdst' in data or 'jscinterval'in data %},
+        {% endif %}
+    {% endif %}
+    
+    {% if 'jscmonths' in data %}
+        jscmonths={{ data.jscmonths|qtLiteral(conn) }}::boolean[]
+        {% if 'jscminutes' in data or 'jscmonthdays' in data or 
+            'jschours' in data or 'jscweekdays' in data or
+            'jscoccurrence' in data or 'jscdst' in data or
+            'jscinterval'in data %},
+        {% endif %}
+    {% endif %}
+    
+    {% if 'jscminutes' in data %}
+        jscminutes={{ data.jscminutes|qtLiteral(conn) }}::boolean[]
+        {% if 'jscmonthdays' in data or 'jschours' in data or 
+            'jscweekdays' in data or 'jscoccurrence' in data or 
+            'jscdst' in data or 'jscinterval'in data %},
+        {% endif %}
+    {% endif %}
+    
+    {% if 'jscmonthdays' in data %}
+        jscmonthdays={{ data.jscmonthdays|qtLiteral(conn) }}::boolean[]
+        {% if 'jschours' in data or 'jscweekdays' in data or
+            'jscoccurrence' in data or 'jscdst' in data or
+            'jscinterval'in data %},
+        {% endif %}
+    {% endif %}
+    
+    {% if 'jschours' in data %}
+        jschours={{ data.jschours|qtLiteral(conn) }}::boolean[]
+        {% if 'jscweekdays' in data or 'jscoccurrence' in data or 
+            'jscdst' in data or 'jscinterval'in data %},
+        {% endif %}
+    {% endif %}
+    
+    {% if 'jscweekdays' in data %}
+        jscweekdays={{ data.jscweekdays|qtLiteral(conn) }}::boolean[]
+        {%if 'jscoccurrence' in data or 'jscdst' in data or
+            'jscinterval'in data %},
+        {% endif %}
+    {% endif %}
+    
+    {% if 'jscoccurrence' in data %}
+        jscoccurrence={{ data.jscoccurrence|qtLiteral(conn) }}::boolean[]
+        {% if 'jscdst' in data or 'jscinterval'in data %},
+        {% endif %}
+    {% endif %}
+    
+    {% if 'jscinterval' in data %}
+        jscinterval={{ data.jscinterval|qtLiteral(conn) }}::integer
+        {% if 'jscdst' in data  %},
+        {% endif %}
+    {% endif %}
 
-    jscname={{ data.jscname|qtLiteral(conn) }}::text{% if 'jscdesc' in data or 'jscstart' in data or 'jscend' in data or 'jscmonths' in data or 'jscminutes' in data or 'jscmonthdays' in data or 'jschours' in data or 'jscweekdays' in data or 'jscenabled' in data %},{% endif %}{% endif %}{% if 'jscenabled' in data %}
+    {% if 'jscdst' in data %}
+        jscdst={% if data.jscdst %}true,{% else %}false,{% endif %}
+    {% endif %}
+    
+    {% if 'jscdststart' in data %}
+        jscdststart={{ data.jscdststart|qtLiteral(conn) }}::timestamptz,
+    {% endif %}
+    
+    {% if 'jscdstend' in data %}
+        jscdstend={% if data.jscdstend %}{{ data.jscdstend|qtLiteral(conn) }}::timestamptz{% else %}NULL::timestamptz{% endif %}
+    {% endif %}
 
-    jscenabled={% if data.jscenabled %}true{% else %}false{% endif %}{% if 'jscdesc' in data or 'jscstart' in data or 'jscend' in data or 'jscmonths' in data or 'jscminutes' in data or 'jscmonthdays' in data or 'jschours' in data or 'jscweekdays' in data %},{% endif %}{% endif %}{% if 'jscdesc' in data %}
-
-    jscdesc={% if data.jscdesc %}{{ data.jscdesc|qtLiteral(conn) }}::text{% else %}''::text{% endif %}{% if 'jscstart' in data or 'jscend' in data or 'jscmonths' in data or 'jscminutes' in data or 'jscmonthdays' in data or 'jschours' in data or 'jscweekdays' in data %},{% endif %}{% endif %}{% if 'jscstart' in data %}
-
-    jscstart={{ data.jscstart|qtLiteral(conn) }}::timestamptz{% if 'jscend' in data or 'jscmonths' in data or 'jscminutes' in data or 'jscmonthdays' in data or 'jschours' in data or 'jscweekdays' in data %},{% endif %}{% endif %}{% if 'jscend' in data %}
-
-    jscend={% if data.jscend %}{{ data.jscend|qtLiteral(conn) }}::timestamptz{% else %}NULL::timestamptz{% endif %}{% if 'jscmonths' in data or 'jscminutes' in data or 'jscmonthdays' in data or 'jschours' in data or 'jscweekdays' in data %},{% endif %}{% endif %}{% if 'jscmonths' in data %}
-
-    jscmonths={{ data.jscmonths|qtLiteral(conn) }}::boolean[]{% if 'jscminutes' in data or 'jscmonthdays' in data or 'jschours' in data or 'jscweekdays' in data %},{% endif %}{% endif %}{% if 'jscminutes' in data %}
-
-    jscminutes={{ data.jscminutes|qtLiteral(conn) }}::boolean[]{% if 'jscmonthdays' in data or 'jschours' in data or 'jscweekdays' in data %},{% endif %}{% endif %}{% if 'jscmonthdays' in data %}
-
-    jscmonthdays={{ data.jscmonthdays|qtLiteral(conn) }}::boolean[]{% if 'jschours' in data or 'jscweekdays' in data %},{% endif %}{% endif %}{% if 'jschours' in data %}
-
-    jschours={{ data.jschours|qtLiteral(conn) }}::boolean[]{% if 'jscweekdays' in data %},{% endif %}{% endif %}{% if 'jscweekdays' in data %}
-
-    jscweekdays={{ data.jscweekdays|qtLiteral(conn) }}::boolean[]{% endif %}{% if 'jscoccurrence' in data %}
-
-    jscoccurrence={{ data.jscoccurrence|qtLiteral(conn) }}::boolean[]{% endif %}
 
 WHERE jscid={{ jscid|qtLiteral(conn) }}::integer AND jscjobid={{ jid|qtLiteral(conn) }}::integer;{% endif %}{% if 'jscexceptions' in data %}
 {% if 'added' in data.jscexceptions and data.jscexceptions.added|length > 0 %}

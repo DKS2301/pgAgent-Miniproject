@@ -254,7 +254,10 @@ class DashboardModule(PgAdminModule):
             'dashboard.replication_stats',
             'dashboard.job_monitor',
             'dashboard.run_job',
-            'dashboard.job_log'
+            'dashboard.job_log',
+            'dashboard.audit_logs',
+            'dashboard.job_names',
+            'dashboard.job_dependency_graph',
         ] + pgd_replication.get_exposed_url_endpoints()
 
 
@@ -1143,3 +1146,133 @@ def job_log(sid=None, jobid=None):
             info=error_traceback,
             status=500
         )
+
+@blueprint.route('/audit_logs/<int:sid>',
+                 endpoint='audit_logs', methods=['GET'])
+@pga_login_required
+@check_precondition
+def audit_logs(sid=None):
+    """
+    This function returns pgAgent audit logs with optional filtering
+    :param sid: server id
+    :return: JSON response with audit logs
+    """
+    
+    if not sid:
+        return internal_server_error(errormsg=ERROR_SERVER_ID_NOT_SPECIFIED)
+    
+    # Get filter parameters from request
+    operation = request.args.get('operation', None)
+    username = request.args.get('username', None)
+    jobname = request.args.get('jobname', None)
+    start_date = request.args.get('start_date', None)
+    end_date = request.args.get('end_date', None)
+    
+    # Prepare template parameters
+    params = {
+        'operation': operation,
+        'username': username,
+        'jobname': jobname,
+        'start_date': start_date,
+        'end_date': end_date
+    }
+    
+    sql = render_template("/".join(['dashboard/sql/default', 'audit_logs.sql']), **params)
+    status, res = g.conn.execute_dict(sql)
+    
+    if not status:
+        return internal_server_error(errormsg=str(res))
+    
+    return ajax_response(
+        response=res['rows'],
+        status=200
+    )
+
+
+@blueprint.route('/job_names/<int:sid>',
+                 endpoint='job_names', methods=['GET'])
+@pga_login_required
+@check_precondition
+def job_names(sid=None):
+    """
+    This function returns all pgAgent job names for the dropdown
+    :param sid: server id
+    :return: JSON response with job names
+    """
+    
+    if not sid:
+        return internal_server_error(errormsg=ERROR_SERVER_ID_NOT_SPECIFIED)
+    
+    sql = render_template("/".join(['dashboard/sql/default', 'job_names.sql']))
+    status, res = g.conn.execute_dict(sql)
+    
+    if not status:
+        return internal_server_error(errormsg=str(res))
+    
+    return ajax_response(
+        response=res['rows'],
+        status=200
+    )
+
+@blueprint.route("/job_dependency_graph/<int:sid>", endpoint='job_dependency_graph')
+@pga_login_required
+@check_precondition
+def job_dependency_graph(sid):
+    """Get the job dependency graph data."""
+    try:
+        if not sid:
+            return internal_server_error(errormsg=ERROR_SERVER_ID_NOT_SPECIFIED)
+
+        # Get all jobs
+        status, jobs = g.conn.execute_dict(
+            render_template(
+                "/".join([g.template_path, 'jobs.sql'])
+            )
+        )
+        if not status:
+            return internal_server_error(errormsg=jobs)
+
+        # Get all dependencies
+        status, deps = g.conn.execute_dict(
+            render_template(
+                "/".join([g.template_path, 'dependencies.sql'])
+            )
+        )
+        if not status:
+            return internal_server_error(errormsg=deps)
+
+        # Build the graph data
+        nodes = []
+        edges = []
+        
+        # Add nodes for all jobs
+        for job in jobs['rows']:
+            nodes.append({
+                'id': job['jobid'],
+                'name': job['jobname'],
+                'enabled': job['jobenabled'],
+                'status': job['status'],
+                'next_run': job['jobnextrun'],
+                'last_run': job['joblastrun']
+            })
+
+        # Add edges for all dependencies
+        for dep in deps['rows']:
+            edges.append({
+                'source': dep['jobid'],
+                'target': dep['dependent_jobid'],
+                'dependent_jobname': dep['dependent_jobname']
+            })
+
+        return ajax_response(
+            response={
+                'dependency_graph': {
+                    'nodes': nodes,
+                    'links': edges
+                }
+            },
+            status=200
+        )
+
+    except Exception as e:
+        return internal_server_error(errormsg=str(e))

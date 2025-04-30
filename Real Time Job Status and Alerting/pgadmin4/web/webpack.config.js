@@ -25,9 +25,6 @@ const extractStyle = new MiniCssExtractPlugin({
 const BundleAnalyzerPlugin = require('webpack-bundle-analyzer').BundleAnalyzerPlugin;
 const CopyPlugin = require('copy-webpack-plugin');
 const ImageMinimizerPlugin = require('image-minimizer-webpack-plugin');
-
-const envType = PRODUCTION ? 'production': 'development';
-const devToolVal = PRODUCTION ? false : 'eval';
 const analyzerMode = process.env.ANALYZE=='true' ? 'static' : 'disabled';
 
 const outputPath = __dirname + '/pgadmin/static/js/generated';
@@ -82,7 +79,7 @@ module.exports = [{
     assets: true,
     entrypoints: true,
     modules: true,
-    version: true, },
+    version: true },
   // The base directory, an absolute path, for resolving entry points and loaders
   // from configuration.
   context: __dirname,

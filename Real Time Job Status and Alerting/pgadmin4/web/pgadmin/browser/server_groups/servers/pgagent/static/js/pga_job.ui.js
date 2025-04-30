@@ -10,6 +10,50 @@
 import gettext from 'sources/gettext';
 import BaseUISchema from 'sources/SchemaView/base_schema.ui';
 import PgaJobScheduleSchema from '../../schedules/static/js/pga_schedule.ui';
+import PgaJobDependencySchema from './pga_job_dependency.ui';
+
+class AuditLogSchema extends BaseUISchema {
+  get baseFields() {
+    return [
+      {
+        id: 'audit_id', label: gettext('ID'), cell: 'string', type: 'text',
+        readonly: true, mode: ['properties'], sortable: true,
+      }, {
+        id: 'operation_type', label: gettext('Operation'), cell: 'string', type: 'text',
+        readonly: true, mode: ['properties'], sortable: true,
+      }, {
+        id: 'operation_time', label: gettext('Time'), cell: 'string', type: 'text',
+        readonly: true, mode: ['properties'], sortable: true,
+      }, {
+        id: 'operation_user', label: gettext('User'), cell: 'string', type: 'text',
+        readonly: true, mode: ['properties'], sortable: true,
+      }, {
+        id: 'old_values', label: gettext('Old Values'), cell: 'string', type: 'jsonb',
+        readonly: true, mode: ['properties'],
+        controlProps: {
+          formatter: {
+            fromRaw: (value) => {
+              return value ? JSON.stringify(value, null, 4) : '';
+            }
+          }
+        }
+      }, {
+        id: 'new_values', label: gettext('New Values'), cell: 'string', type: 'jsonb',
+        readonly: true, mode: ['properties'],
+        controlProps: {
+          formatter: {
+            fromRaw: (value) => {
+              return value ? JSON.stringify(value, null, 4) : '';
+            }
+          }
+        }
+      }, {
+        id: 'additional_info', label: gettext('Additional Info'), cell: 'string', type: 'text',
+        readonly: true, mode: ['properties'],
+      }
+    ];
+  }
+}
 
 export default class PgaJobSchema extends BaseUISchema {
   constructor(fieldOptions={}, getPgaJobStepSchema=()=>[], initValues={}) {
@@ -37,11 +81,13 @@ export default class PgaJobSchema extends BaseUISchema {
       jnemailrecipients: '',
       jncustomtext: '',
       jnlastnotification: undefined,
+      jdependencies: [],
       ...initValues,
     });
 
     this.fieldOptions = {
       jobjclid: [],
+      jobs: [],
       ...fieldOptions,
     };
     this.getPgaJobStepSchema = getPgaJobStepSchema;
@@ -196,6 +242,150 @@ export default class PgaJobSchema extends BaseUISchema {
         id: 'jnlastnotification', type: 'text', mode: ['properties'],
         label: gettext('Last Notification'),
         group: gettext('Notifications'),
+      },{
+        id: 'jdependencies', label: '', group: gettext('Dependencies'),
+        type: 'collection', mode: ['edit', 'create', 'properties'],
+        schema: new PgaJobDependencySchema({
+          jobs: this.fieldOptions.jobs,
+        }),
+        canAdd: true, canDelete: true, canEdit: true,
+        columns: ['dependent_jobname'],
+        uniqueCol: ['dependent_jobid'],
+      },{
+        id: 'audit_logs', label: '', group: gettext('Audit Logs'),
+        mode: ['properties'],
+        type: 'collection',
+        schema: new AuditLogSchema(),
+        canAdd: false, canDelete: false, canEdit: false,
+        columns: ['audit_id', 'operation_type', 'operation_time', 'operation_user'],
+        url: 'audit_log',
+        // Enable sorting
+        isSortable: true,
+        sortColumns: {
+          'audit_id': 'numeric',
+          'operation_type': 'string',
+          'operation_time': 'string',
+          'operation_user': 'string'
+        },
+        // Add filter toolbar with simple filter buttons
+        customButtomPanel: true,
+        customButtomPanelRender: (panel) => {
+          const container = document.createElement('div');
+          container.className = 'pg-audit-filter-container';
+          container.style.padding = '8px';
+          container.style.display = 'flex';
+          container.style.flexWrap = 'wrap';
+          container.style.gap = '8px';
+          container.style.alignItems = 'center';
+          
+          // Create operation type filter buttons
+          const opTypeLabel = document.createElement('span');
+          opTypeLabel.textContent = 'Filter by: ';
+          opTypeLabel.style.marginRight = '8px';
+          container.appendChild(opTypeLabel);
+          
+          // Create filter buttons for operation types
+          const operations = [
+            { label: 'CREATE', value: 'CREATE' },
+            { label: 'MODIFY', value: 'MODIFY' },
+            { label: 'EXECUTE', value: 'EXECUTE' },
+          ];
+          
+          operations.forEach(op => {
+            const btn = document.createElement('button');
+            btn.className = 'btn btn-secondary btn-sm';
+            btn.textContent = op.label;
+            btn.style.marginRight = '5px';
+            btn.onclick = function() {
+              // Apply filter when button is clicked
+              panel.onCustomFilter({
+                operation_types: op.value
+              });
+            };
+            container.appendChild(btn);
+          });
+          
+          // Add a reset button
+          const resetBtn = document.createElement('button');
+          resetBtn.className = 'btn btn-secondary btn-sm';
+          resetBtn.textContent = 'Show All';
+          resetBtn.style.marginLeft = '5px';
+          resetBtn.onclick = function() {
+            // Reset filters
+            panel.onCustomFilter({});
+          };
+          container.appendChild(resetBtn);
+          
+          // Add date range filters
+          const dateContainer = document.createElement('div');
+          dateContainer.style.display = 'flex';
+          dateContainer.style.alignItems = 'center';
+          dateContainer.style.marginTop = '8px';
+          dateContainer.style.width = '100%';
+          
+          const dateLabel = document.createElement('span');
+          dateLabel.textContent = 'Date range: ';
+          dateLabel.style.marginRight = '8px';
+          dateContainer.appendChild(dateLabel);
+          
+          // Add date inputs
+          const dateFrom = document.createElement('input');
+          dateFrom.type = 'date';
+          dateFrom.className = 'form-control';
+          dateFrom.style.marginRight = '8px';
+          dateFrom.style.width = '150px';
+          dateContainer.appendChild(dateFrom);
+          
+          const dateTo = document.createElement('input');
+          dateTo.type = 'date';
+          dateTo.className = 'form-control';
+          dateTo.style.marginRight = '8px';
+          dateTo.style.width = '150px';
+          dateContainer.appendChild(dateTo);
+          
+          // Add apply button for date range
+          const applyDateBtn = document.createElement('button');
+          applyDateBtn.className = 'btn btn-primary btn-sm';
+          applyDateBtn.textContent = 'Apply Date Filter';
+          applyDateBtn.onclick = function() {
+            const params = {};
+            if (dateFrom.value) params.date_from = dateFrom.value;
+            if (dateTo.value) params.date_to = dateTo.value;
+            panel.onCustomFilter(params);
+          };
+          dateContainer.appendChild(applyDateBtn);
+          
+          container.appendChild(dateContainer);
+          
+          // Add some styling
+          const style = document.createElement('style');
+          style.textContent = `
+            .pg-audit-filter-container button:hover {
+              background-color: #4a6785;
+              color: white;
+            }
+          `;
+          container.appendChild(style);
+          
+          return container;
+        },
+        onCustomFilter: (filterValues) => {
+          const params = {};
+          
+          if (filterValues.operation_types) {
+            params.operation_types = filterValues.operation_types;
+          }
+          
+          if (filterValues.date_from) {
+            params.date_from = filterValues.date_from;
+          }
+          
+          if (filterValues.date_to) {
+            params.date_to = filterValues.date_to;
+          }
+          
+          return params;
+        },
       }
     ];
   }

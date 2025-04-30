@@ -698,44 +698,46 @@ class JobView(PGChildNodeView):
         'msql': [{'get': 'msql'}, {'get': 'msql'}],
         'run_now': [{'put': 'run_now'}],
         'classes': [{}, {'get': 'job_classes'}],
+        'jobs': [{'get': 'jobs'}, {'get': 'jobs'}],
         'children': [{'get': 'children'}],
-        'stats': [{'get': 'statistics'}]
+        'stats': [{'get': 'statistics'}],
+        'audit_log': [{'get': 'audit_log'}],
+        'dependency_graph': [{'get': 'dependency_graph'}]
     })
 
     def check_precondition(f):
-        """
-        This function will behave as a decorator which will checks
-        database connection before running view, it will also attaches
-        manager,conn & template_path properties to self
-        """
+            """
+            This function will behave as a decorator which will checks
+            database connection before running view, it will also attaches
+            manager,conn & template_path properties to self
+            """
 
-        @wraps(f)
-        def wrap(self, *args, **kwargs):
+            @wraps(f)
+            def wrap(self, *args, **kwargs):
 
-            self.manager = get_driver(
-                PG_DEFAULT_DRIVER
-            ).connection_manager(
-                kwargs['sid']
-            )
-            self.conn = self.manager.connection()
+                self.manager = get_driver(
+                    PG_DEFAULT_DRIVER
+                ).connection_manager(
+                    kwargs['sid']
+                )
+                self.conn = self.manager.connection()
 
-            # Set the template path for the sql scripts.
-            self.template_path = 'pga_job/sql/pre3.4'
+                # Set the template path for the sql scripts.
+                self.template_path = 'pga_job/sql/pre3.4'
 
-            if 'pgAgent'not in self.manager.db_info:
-                _, res = self.conn.execute_dict("""
-SELECT EXISTS(
-        SELECT 1 FROM information_schema.columns
-        WHERE
-            table_schema='pgagent' AND table_name='pga_jobstep' AND
-            column_name='jstconnstr'
-    ) has_connstr""")
+                if 'pgAgent'not in self.manager.db_info:
+                    _, res = self.conn.execute_dict("""
+    SELECT EXISTS(
+            SELECT 1 FROM information_schema.columns
+            WHERE
+                table_schema='pgagent' AND table_name='pga_jobstep' AND
+                column_name='jstconnstr'
+        ) has_connstr""")
 
-                self.manager.db_info['pgAgent'] = res['rows'][0]
+                    self.manager.db_info['pgAgent'] = res['rows'][0]
 
-            return f(self, *args, **kwargs)
-        return wrap
-
+                return f(self, *args, **kwargs)
+            return wrap
     @check_precondition
     def nodes(self, gid, sid, jid=None):
         SQL = render_template(
@@ -784,67 +786,129 @@ SELECT EXISTS(
 
     @check_precondition
     def properties(self, gid, sid, jid=None):
-        SQL = render_template(
-            "/".join([self.template_path, self._PROPERTIES_SQL]),
-            jid=jid, conn=self.conn
+        """Get the job properties."""
+        if jid is None:
+            # Get all jobs
+            SQL = render_template(
+                "/".join([self.template_path, self._NODES_SQL]),
+                conn=self.conn
+            )
+            status, rset = self.conn.execute_dict(SQL)
+            
+            if not status:
+                return internal_server_error(errormsg=rset)
+                
+            return ajax_response(
+                response=rset['rows'],
+                status=200
+            )
+            
+        # Get specific job properties
+        status, res = self.conn.execute_dict(
+            render_template(
+                "/".join([self.template_path, self._PROPERTIES_SQL]),
+                jid=jid, conn=self.conn, last_system_oid=0
+            )
         )
-        status, rset = self.conn.execute_dict(SQL)
+        if not status:
+            return internal_server_error(errormsg=res)
 
+        if len(res['rows']) == 0:
+            return gone(
+                _("Could not find the object on the server.")
+            )
+
+        row = res['rows'][0]
+
+        # Get job steps
+        status, rset = self.conn.execute_dict(
+            render_template(
+                "/".join([self.template_path, 'steps.sql']),
+                jid=jid, conn=self.conn,
+                has_connstr=self.manager.db_info['pgAgent']['has_connstr']
+            )
+        )
         if not status:
             return internal_server_error(errormsg=rset)
 
-        if jid is not None:
-            if len(rset['rows']) != 1:
-                return gone(
-                    errormsg=_(
-                        "Could not find the pgAgent job on the server."
+        row['jsteps'] = rset['rows']
+
+        # Get job schedules
+        status, rset = self.conn.execute_dict(
+            render_template(
+                "/".join([self.template_path, 'schedules.sql']),
+                jid=jid, conn=self.conn
+            )
+        )
+        if not status:
+            return internal_server_error(errormsg=rset)
+
+        # Create jscexceptions in the correct format that React control required
+        for schedule in rset['rows']:
+            if 'jexid' in schedule and schedule['jexid'] is not None \
+                    and len(schedule['jexid']) > 0:
+                schedule['jscexceptions'] = []
+                index = 0
+                for exid in schedule['jexid']:
+                    schedule['jscexceptions'].append(
+                        {'jexid': exid,
+                         'jexdate': schedule['jexdate'][index],
+                         'jextime': schedule['jextime'][index]
+                         }
                     )
-                )
-            res = rset['rows'][0]
-            status, rset = self.conn.execute_dict(
-                render_template(
-                    "/".join([self.template_path, 'steps.sql']),
-                    jid=jid, conn=self.conn,
-                    has_connstr=self.manager.db_info['pgAgent']['has_connstr']
-                )
+                    index += 1
+
+        row['jschedules'] = rset['rows']
+
+        # Get job dependencies
+        status, rset = self.conn.execute_dict(
+            render_template(
+                "/".join([self.template_path, 'dependencies.sql']),
+                jid=jid, conn=self.conn
             )
-            if not status:
-                return internal_server_error(errormsg=rset)
-            res['jsteps'] = rset['rows']
-            status, rset = self.conn.execute_dict(
-                render_template(
-                    "/".join([self.template_path, 'schedules.sql']),
-                    jid=jid, conn=self.conn
-                )
+        )
+        if not status:
+            return internal_server_error(errormsg=rset)
+
+        # Set original_dependent_jobid to track changes
+        for dep in rset['rows']:
+            dep['original_dependent_jobid'] = dep['dependent_jobid']
+
+        row['jdependencies'] = rset['rows']
+        
+        # Get audit logs for the job
+        status, rset = self.conn.execute_dict(
+            render_template(
+                "/".join([self.template_path, 'audit_log.sql']),
+                jid=jid, conn=self.conn
             )
-            if not status:
-                return internal_server_error(errormsg=rset)
-
-            # Create jscexceptions in the correct format that React control
-            # required.
-            for schedule in rset['rows']:
-                if 'jexid' in schedule and schedule['jexid'] is not None \
-                        and len(schedule['jexid']) > 0:
-                    schedule['jscexceptions'] = []
-                    index = 0
-                    for exid in schedule['jexid']:
-                        schedule['jscexceptions'].append(
-                            {'jexid': exid,
-                             'jexdate': schedule['jexdate'][index],
-                             'jextime': schedule['jextime'][index]
-                             }
-                        )
-
-                        index += 1
-
-            res['jschedules'] = rset['rows']
-        else:
-            res = rset['rows']
+        )
+        if not status:
+            return internal_server_error(errormsg=rset)
+            
+        # Process JSON fields to ensure they're properly formatted
+        for audit_row in rset['rows']:
+            if 'old_values' in audit_row and audit_row['old_values']:
+                if isinstance(audit_row['old_values'], str):
+                    try:
+                        audit_row['old_values'] = json.loads(audit_row['old_values'])
+                    except ValueError:
+                        pass
+                        
+            if 'new_values' in audit_row and audit_row['new_values']:
+                if isinstance(audit_row['new_values'], str):
+                    try:
+                        audit_row['new_values'] = json.loads(audit_row['new_values'])
+                    except ValueError:
+                        pass
+                        
+        row['audit_logs'] = rset['rows']
 
         return ajax_response(
-            response=res,
+            response=row,
             status=200
         )
+
 
     @check_precondition
     def create(self, gid, sid):
@@ -883,6 +947,20 @@ SELECT EXISTS(
             self.conn.execute_void('END')
             return internal_server_error(errormsg=res)
 
+        job_id = res
+            
+        # Insert dependencies if any
+        if 'jdependencies' in data and len(data['jdependencies']) > 0:
+            status, res = self.conn.execute_void(
+                render_template(
+                    "/".join([self.template_path, 'create_dependencies.sql']),
+                    data=data, conn=self.conn, jid=job_id
+                )
+            )
+            if not status:
+                self.conn.execute_void('END')
+                return internal_server_error(errormsg=res)
+
         # We need oid of newly created database
         status, res = self.conn.execute_dict(
             render_template(
@@ -910,7 +988,6 @@ SELECT EXISTS(
     @check_precondition
     def update(self, gid, sid, jid):
         """Update the pgAgent Job."""
-
         data = request.form if request.form else json.loads(
             request.data.decode('utf-8')
         )
@@ -927,6 +1004,17 @@ SELECT EXISTS(
         )
 
         if not status:
+            return internal_server_error(errormsg=res)
+         # Update dependencies
+        status, res = self.conn.execute_void(
+            render_template(
+                "/".join([self.template_path, 'update_dependencies.sql']),
+                data=data, conn=self.conn, jid=jid
+            )
+        )
+
+        if not status:
+            self.conn.execute_void('END')
             return internal_server_error(errormsg=res)
 
         # We need oid of newly created database
@@ -1138,6 +1226,176 @@ SELECT EXISTS(
             data=res['rows'],
             status=200
         )
+    
+
+    @check_precondition
+    def jobs(self, gid, sid, jid=None):
+        """
+        This function will return the list of jobs for dependencies.
+        """
+        status, res = self.conn.execute_dict(
+            render_template(
+                "/".join([self.template_path, 'jobs.sql']),
+                jid=jid,
+                conn=self.conn
+            )
+        )
+
+        if not status:
+            return internal_server_error(errormsg=res)
+
+        return make_json_response(
+            data=res['rows'],
+            status=200
+        )
+
+    @check_precondition
+    def audit_log(self, gid, sid, jid):
+        """
+        Returns the audit log entries for the specified job.
+        """
+        # First check if the audit log table exists
+        check_sql = """
+        SELECT EXISTS (
+            SELECT FROM information_schema.tables 
+            WHERE table_schema = 'pgagent' 
+            AND table_name = 'pga_job_audit_log'
+        ) as table_exists;
+        """
+        status, check_res = self.conn.execute_dict(check_sql)
+        
+        if not status:
+            return internal_server_error(errormsg=check_res)
+            
+        if len(check_res['rows']) == 0 or not check_res['rows'][0]['table_exists']:
+            # Table doesn't exist, return empty result
+            return ajax_response(
+                response={'rows': [], 'msg': 'Audit log table does not exist. Please upgrade pgAgent to version 4.3 or later.'},
+                status=200
+            )
+        
+        # Get row threshold preference
+        pref = Preferences.module('browser')
+        rows_threshold = pref.preference(
+            'pgagent_row_threshold'
+        )
+        
+        # Get filter parameters from request
+        operation_types = request.args.get('operation_types', None)
+        date_from = request.args.get('date_from', None)
+        date_to = request.args.get('date_to', None)
+        
+        # Get sorting parameters
+        sort_column = request.args.get('sort', 'operation_time')
+        sort_order = request.args.get('sort_order', 'desc')
+        
+        # Format operation types for SQL query if provided
+        operation_types_sql = None
+        if operation_types:
+            op_types = operation_types.split(',')
+            # Format as SQL string list: 'CREATE', 'MODIFY', etc.
+            operation_types_sql = "'" + "', '".join(op_types) + "'"
+
+        # Table exists, proceed with query
+        status, res = self.conn.execute_dict(
+            render_template(
+                "/".join([self.template_path, 'audit_log.sql']),
+                jid=jid,
+                conn=self.conn,
+                operation_types=operation_types_sql,
+                date_from=date_from,
+                date_to=date_to,
+                sort_column=sort_column,
+                sort_order=sort_order,
+                rows_threshold=rows_threshold.get()
+            )
+        )
+
+        if not status:
+            return internal_server_error(errormsg=res)
+        
+        # Debug: Log the number of rows returned and filter parameters
+        filter_info = f"Filters: operation_types={operation_types}, date_from={date_from}, date_to={date_to}"
+        print(f"Audit log query for job {jid} returned {len(res['rows'])} rows. {filter_info}")
+            
+        # Process JSON fields to ensure they're properly formatted
+        for row in res['rows']:
+            if 'old_values' in row and row['old_values']:
+                if isinstance(row['old_values'], str):
+                    try:
+                        row['old_values'] = json.loads(row['old_values'])
+                    except ValueError:
+                        pass
+                        
+            if 'new_values' in row and row['new_values']:
+                if isinstance(row['new_values'], str):
+                    try:
+                        row['new_values'] = json.loads(row['new_values'])
+                    except ValueError:
+                        pass
+
+        return ajax_response(
+            response=res,
+            status=200
+        )
+
+    @check_precondition
+    def dependency_graph(self, gid, sid):
+        """Get the job dependency graph data."""
+        try:
+            # Get all jobs
+            status, jobs = self.conn.execute_dict(
+                render_template(
+                    "/".join([self.template_path, self._NODES_SQL]),
+                    conn=self.conn
+                )
+            )
+            if not status:
+                return internal_server_error(errormsg=jobs)
+
+            # Get all dependencies
+            status, deps = self.conn.execute_dict(
+                render_template(
+                    "/".join([self.template_path, 'dependencies.sql']),
+                    conn=self.conn
+                )
+            )
+            if not status:
+                return internal_server_error(errormsg=deps)
+
+            # Build the graph data
+            nodes = []
+            edges = []
+            
+            # Add nodes for all jobs
+            for job in jobs['rows']:
+                nodes.append({
+                    'id': job['jobid'],
+                    'name': job['jobname'],
+                    'enabled': job['jobenabled'],
+                    'status': job['jlgstatus'],
+                    'next_run': job['jobnextrun'],
+                    'last_run': job['joblastrun']
+                })
+
+            # Add edges for all dependencies
+            for dep in deps['rows']:
+                edges.append({
+                    'source': dep['jobid'],
+                    'target': dep['dependent_jobid'],
+                    'dependent_jobname': dep['dependent_jobname']
+                })
+
+            return ajax_response(
+                response={
+                    'nodes': nodes,
+                    'edges': edges
+                },
+                status=200
+            )
+
+        except Exception as e:
+            return internal_server_error(errormsg=str(e))
 
     def format_schedule_step_data(self, data):
         """
